@@ -15,6 +15,7 @@ TAB_NAMES=("STATUS" "PRESETS" "EFFECTS" "PALETTES" "SEGMENTS" "ADVANCED")
 TAB_INDEX=0
 SELECTED_DEVICE_INDEX=0
 SHOW_HELP=0
+NEEDS_REDRAW=1
 
 PRESETS_IDS=()
 PRESETS_NAMES=()
@@ -112,6 +113,7 @@ refresh_selected_device() {
   local id=$1
   update_device_state "$id"
   update_device_info "$id"
+  NEEDS_REDRAW=1
 }
 
 refresh_all_devices() {
@@ -124,11 +126,13 @@ refresh_all_devices() {
       update_device_state "$id"
     fi
   done
+  NEEDS_REDRAW=1
 }
 
 apply_state_payload() {
   local id=$1 payload=$2
   api_set_state "$id" "$payload" >/dev/null || true
+  NEEDS_REDRAW=1
 }
 
 current_device_id() {
@@ -337,9 +341,11 @@ handle_key() {
           3) fetch_palettes "$id" ;;
         esac
       fi
+      NEEDS_REDRAW=1
       ;;
     $'\e[Z')
       TAB_INDEX=$(( (TAB_INDEX - 1 + ${#TAB_NAMES[@]}) % ${#TAB_NAMES[@]} ))
+      NEEDS_REDRAW=1
       ;;
     $'\e[A')
       handle_up
@@ -349,36 +355,46 @@ handle_key() {
       ;;
     $'\e[D')
       handle_left
+      NEEDS_REDRAW=1
       ;;
     $'\e[C')
       handle_right
+      NEEDS_REDRAW=1
       ;;
     '')
       ;;
     $'\n'|$'\r')
       handle_enter "$id"
+      NEEDS_REDRAW=1
       ;;
     r)
       [[ -n "$id" ]] && refresh_selected_device "$id"
+      NEEDS_REDRAW=1
       ;;
     a)
       handle_add_device
+      NEEDS_REDRAW=1
       ;;
     d)
       handle_delete_device
+      NEEDS_REDRAW=1
       ;;
     e)
       handle_edit_device
+      NEEDS_REDRAW=1
       ;;
     s)
       discover_devices
       model_save_devices
+      NEEDS_REDRAW=1
       ;;
     '?')
       SHOW_HELP=$((1-SHOW_HELP))
+      NEEDS_REDRAW=1
       ;;
     l)
       handle_live_toggle "$id"
+      NEEDS_REDRAW=1
       ;;
     i)
       if [[ "$EFFECT_PARAM" == "speed" ]]; then
@@ -386,24 +402,29 @@ handle_key() {
       else
         EFFECT_PARAM="speed"
       fi
+      NEEDS_REDRAW=1
       ;;
     c)
       if (( TAB_INDEX == 4 )); then
         COLOR_CHANNEL=$(( (COLOR_CHANNEL + 1) % 3 ))
       fi
+      NEEDS_REDRAW=1
       ;;
     '[')
       if (( SELECTED_DEVICE_INDEX > 0 )); then
         SELECTED_DEVICE_INDEX=$((SELECTED_DEVICE_INDEX-1))
       fi
+      NEEDS_REDRAW=1
       ;;
     ']')
       if (( SELECTED_DEVICE_INDEX < ${#DEVICE_IDS[@]}-1 )); then
         SELECTED_DEVICE_INDEX=$((SELECTED_DEVICE_INDEX+1))
       fi
+      NEEDS_REDRAW=1
       ;;
     b)
       handle_reboot "$id"
+      NEEDS_REDRAW=1
       ;;
     g)
       if (( TAB_INDEX == 4 )); then
@@ -413,6 +434,7 @@ handle_key() {
           SEG_APPLY_ALL=1
         fi
       fi
+      NEEDS_REDRAW=1
       ;;
   esac
 }
@@ -445,6 +467,7 @@ handle_up() {
       fi
       ;;
   esac
+  NEEDS_REDRAW=1
 }
 
 handle_down() {
@@ -475,6 +498,7 @@ handle_down() {
       fi
       ;;
   esac
+  NEEDS_REDRAW=1
 }
 
 handle_left() {
@@ -737,6 +761,7 @@ handle_delete_device() {
     model_remove_device "$id"
     model_save_devices
     SELECTED_DEVICE_INDEX=0
+    NEEDS_REDRAW=1
   fi
 }
 
@@ -758,6 +783,7 @@ handle_edit_device() {
   model_remove_device "$id"
   model_add_device "$name" "$host" "$port"
   model_save_devices
+  NEEDS_REDRAW=1
 }
 
 handle_live_toggle() {
@@ -807,8 +833,11 @@ main_loop() {
       refresh_selected_device "$id"
       LAST_REFRESH_SELECTED=$now
     fi
-    ui_clear
-    ui_draw
+    if (( NEEDS_REDRAW )); then
+      ui_clear
+      ui_draw
+      NEEDS_REDRAW=0
+    fi
     local key
     key=$(read_key)
     if [[ -n "$key" ]]; then
