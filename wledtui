@@ -1713,12 +1713,12 @@ smoke_test() {
 }
 
 main_loop() {
-  ui_init
-  set_term_title "$APP_NAME"
   model_load_devices
   discover_devices
   model_save_devices
   DEVICE_LIST_DIRTY=1
+  ui_init
+  set_term_title "$APP_NAME"
   trap 'RESIZED=1' WINCH
 
   while true; do
