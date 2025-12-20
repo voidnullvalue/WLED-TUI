@@ -100,7 +100,7 @@ parse_presets_tsv() {
 
 read_key() {
   local key
-  if IFS= read -rsn1 -t 0.1 key; then
+  if IFS= read -rsn1 -t 0.05 key; then
     local status=0
   else
     local status=$?
