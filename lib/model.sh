@@ -24,6 +24,10 @@ declare -A DEV_STATE_JSON=()
 declare -A DEV_INFO_JSON=()
 declare -A DEV_NEXT_POLL=()
 declare -A DEV_BACKOFF=()
+declare -A DEV_TRANSITION=()
+declare -A DEV_NL_ON=()
+declare -A DEV_NL_DUR=()
+declare -A DEV_LIVE=()
 
 device_id() {
   local host=$1 port=$2
@@ -63,6 +67,10 @@ model_add_device() {
   DEV_NEXT_POLL[$id]="0"
   DEV_BACKOFF[$id]="2"
   DEV_INFO_TS[$id]="$existing_info_ts"
+  DEV_TRANSITION[$id]="0"
+  DEV_NL_ON[$id]="false"
+  DEV_NL_DUR[$id]="0"
+  DEV_LIVE[$id]="false"
 }
 
 model_remove_device() {
@@ -78,6 +86,7 @@ model_remove_device() {
   unset DEV_BRI[$id] DEV_ON[$id] DEV_PRESET[$id] DEV_VER[$id] DEV_WIFI[$id]
   unset DEV_UPTIME[$id] DEV_STATE_JSON[$id] DEV_INFO_JSON[$id] DEV_INFO_TS[$id]
   unset DEV_NEXT_POLL[$id] DEV_BACKOFF[$id]
+  unset DEV_TRANSITION[$id] DEV_NL_ON[$id] DEV_NL_DUR[$id] DEV_LIVE[$id]
 }
 
 device_display_name() {
