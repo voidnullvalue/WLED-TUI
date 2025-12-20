@@ -1,0 +1,1764 @@
+#!/usr/bin/env bash
+set -euo pipefail
+shopt -s lastpipe
+IFS=$'\n\t'
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$ROOT_DIR/lib/util.sh"
+source "$ROOT_DIR/lib/model.sh"
+source "$ROOT_DIR/lib/api.sh"
+source "$ROOT_DIR/lib/discover.sh"
+source "$ROOT_DIR/lib/ui.sh"
+
+APP_NAME="WLED TUI"
+TAB_NAMES=("STATUS" "PRESETS" "EFFECTS" "PALETTES" "SEGMENTS" "ADVANCED")
+TAB_INDEX=0
+SELECTED_DEVICE_INDEX=0
+SHOW_HELP=0
+UI_DIRTY=1
+MODEL_DIRTY=0
+RESIZED=0
+
+PRESETS_IDS=()
+PRESETS_NAMES=()
+EFFECTS=()
+PALETTES=()
+SEGMENTS=()
+PRESET_INDEX=0
+SELECTED_PRESET_ID=""
+EFFECT_INDEX=0
+PALETTE_INDEX=0
+SEGMENT_INDEX=0
+COLOR_CHANNEL=0
+EFFECT_PARAM="speed"
+SEG_APPLY_ALL=0
+PRESETS_LOCK="$CONFIG_DIR/presets.lock"
+MODEL_BUSY=0
+INFO_REFRESH_TTL=300
+
+LAST_REFRESH_SELECTED=0
+LAST_POLL_SELECTED=0
+LAST_POLL_ALL=0
+FRAME_INNER_ROWS=0
+LEFT_INNER_WIDTH=0
+RIGHT_INNER_WIDTH=0
+KEYBINDINGS=(
+  "Global|q|q|Quit"
+  "Global|?|?|Toggle help"
+  "Global|Tab|Tab|Next tab"
+  "Global|Shift-Tab|ESC[Z/ESC[1;2Z]|Previous tab"
+  "Global|r|r|Refresh selected device"
+  "Global|s|s|Scan (Bonjour)"
+  "Global|l|l|Toggle live mode"
+  "Global|b|b|Reboot device"
+  "Devices|a|a|Add device"
+  "Devices|d|d|Delete device"
+  "Devices|e|e|Edit device"
+  "Devices|[ / ]|[ / ]|Prev/Next device"
+  "Lists|↑ / ↓|ESC[A/ESC[B]|Move selection"
+  "Status tab|Enter|CR/LF|Toggle power"
+  "Status tab|← / →|ESC[D/ESC[C]|Adjust brightness"
+  "Presets tab|Enter|CR/LF|Apply preset"
+  "Effects tab|Enter|CR/LF|Apply effect"
+  "Effects tab|← / →|ESC[D/ESC[C]|Adjust speed/intensity"
+  "Effects tab|i|i|Toggle speed/intensity"
+  "Palettes tab|Enter|CR/LF|Apply palette"
+  "Segments tab|Enter|CR/LF|Toggle segment"
+  "Segments tab|← / →|ESC[D/ESC[C]|Adjust RGB channel"
+  "Segments tab|c|c|Cycle RGB channel"
+  "Segments tab|g|g|Apply to all segments"
+  "Advanced tab|Enter|CR/LF|Toggle nightlight"
+  "Advanced tab|← / →|ESC[D/ESC[C]|Adjust transition"
+)
+KEYBINDING_SCOPES=(
+  "Global"
+  "Devices"
+  "Lists"
+  "Status tab"
+  "Presets tab"
+  "Effects tab"
+  "Palettes tab"
+  "Segments tab"
+  "Advanced tab"
+)
+HELP_LINES=()
+
+LEFT_ROW_NORMAL=()
+LEFT_ROW_SELECTED=()
+PRESETS_ROW_NORMAL=()
+PRESETS_ROW_SELECTED=()
+EFFECTS_ROW_NORMAL=()
+EFFECTS_ROW_SELECTED=()
+PALETTES_ROW_NORMAL=()
+PALETTES_ROW_SELECTED=()
+SEGMENTS_ROW_NORMAL=()
+SEGMENTS_ROW_SELECTED=()
+SEGMENT_TEXT=()
+SEGMENT_PRIMARY_COLOR=()
+
+LEFT_CACHE_WIDTH=0
+RIGHT_CACHE_WIDTH=0
+DEVICE_LIST_DIRTY=1
+PRESETS_CACHE_DIRTY=1
+EFFECTS_CACHE_DIRTY=1
+PALETTES_CACHE_DIRTY=1
+SEGMENTS_CACHE_DIRTY=1
+
+sync_preset_index() {
+  local target_id=$1
+  PRESET_INDEX=0
+  if (( ${#PRESETS_IDS[@]} == 0 )); then
+    return
+  fi
+  local found=0
+  local i
+  for i in "${!PRESETS_IDS[@]}"; do
+    if [[ "${PRESETS_IDS[$i]}" == "$target_id" ]]; then
+      PRESET_INDEX=$i
+      found=1
+      break
+    fi
+  done
+  if (( PRESET_INDEX >= ${#PRESETS_IDS[@]} )); then
+    PRESET_INDEX=$(( ${#PRESETS_IDS[@]} - 1 ))
+  fi
+  if (( found == 0 )); then
+    set_selected_preset_from_index
+  fi
+}
+
+set_selected_preset_from_index() {
+  if (( ${#PRESETS_IDS[@]} == 0 )); then
+    SELECTED_PRESET_ID=""
+    return
+  fi
+  SELECTED_PRESET_ID="${PRESETS_IDS[$PRESET_INDEX]}"
+}
+
+get_selected_preset_id() {
+  if (( ${#PRESETS_IDS[@]} == 0 )); then
+    return
+  fi
+  printf '%s' "${PRESETS_IDS[$PRESET_INDEX]}"
+}
+
+adjust_preset_index() {
+  local delta=$1
+  if (( ${#PRESETS_IDS[@]} == 0 )); then
+    PRESET_INDEX=0
+    SELECTED_PRESET_ID=""
+    return
+  fi
+  local next=$((PRESET_INDEX + delta))
+  if (( next < 0 )); then
+    next=0
+  elif (( next > ${#PRESETS_IDS[@]} - 1 )); then
+    next=$(( ${#PRESETS_IDS[@]} - 1 ))
+  fi
+  PRESET_INDEX=$next
+  set_selected_preset_from_index
+}
+
+fetch_presets() {
+  local id=$1
+  ensure_config_dir
+  with_lock "$PRESETS_LOCK" fetch_presets_locked "$id"
+}
+
+fetch_presets_locked() {
+  local id=$1
+  PRESETS_IDS=()
+  PRESETS_NAMES=()
+  local data
+  data=$(api_get_presets "$id" || true)
+  if [[ -z "$data" ]]; then
+    PRESET_INDEX=0
+    SELECTED_PRESET_ID=""
+    return
+  fi
+  local desired_id="${SELECTED_PRESET_ID:-}"
+  if [[ -z "$desired_id" || "$desired_id" == "0" ]]; then
+    desired_id="${DEV_PRESET[$id]:-0}"
+  fi
+  SELECTED_PRESET_ID="$desired_id"
+  local lines=()
+  mapfile -t lines < <(parse_presets_tsv <<<"$data" 2>/dev/null || true)
+  local line pid pname
+  for line in "${lines[@]}"; do
+    IFS=$'\t' read -r pid pname <<<"$line"
+    [[ -z "$pid" ]] && continue
+    PRESETS_IDS+=("$pid")
+    PRESETS_NAMES+=("$pname")
+  done
+  sync_preset_index "$SELECTED_PRESET_ID"
+  PRESETS_CACHE_DIRTY=1
+}
+
+fetch_effects() {
+  local id=$1
+  EFFECTS=()
+  local data
+  data=$(api_get_effects "$id" || true)
+  if [[ -z "$data" ]]; then
+    return
+  fi
+  mapfile -t EFFECTS < <(jq -r '.[]' <<<"$data")
+  EFFECTS_CACHE_DIRTY=1
+}
+
+fetch_palettes() {
+  local id=$1
+  PALETTES=()
+  local data
+  data=$(api_get_palettes "$id" || true)
+  if [[ -z "$data" ]]; then
+    return
+  fi
+  mapfile -t PALETTES < <(jq -r '.[]' <<<"$data")
+  PALETTES_CACHE_DIRTY=1
+}
+
+update_device_state() {
+  local id=$1
+  local state
+  state=$(api_get_state "$id" || true)
+  local changed=0
+  if [[ -z "$state" ]]; then
+    if [[ "${DEV_ONLINE[$id]:-0}" != "0" ]]; then
+      DEV_ONLINE[$id]="0"
+      DEVICE_LIST_DIRTY=1
+      changed=1
+    fi
+    local backoff=${DEV_BACKOFF[$id]:-2}
+    backoff=$(clamp "$backoff" 2 30)
+    DEV_NEXT_POLL[$id]="$(( $(now_ts) + backoff ))"
+    DEV_BACKOFF[$id]="$(( backoff * 2 ))"
+    if (( changed )); then
+      MODEL_DIRTY=1
+      return 0
+    fi
+    return 1
+  fi
+  if [[ "${DEV_ONLINE[$id]:-0}" != "1" ]]; then
+    DEV_ONLINE[$id]="1"
+    DEVICE_LIST_DIRTY=1
+    changed=1
+  fi
+  DEV_BACKOFF[$id]="2"
+  DEV_NEXT_POLL[$id]="$(( $(now_ts) + 2 ))"
+  local normalized
+  normalized=$(jq -cS '.' <<<"$state")
+  if [[ "${DEV_STATE_JSON[$id]:-}" != "$normalized" ]]; then
+    DEV_STATE_JSON[$id]="$normalized"
+    DEV_BRI[$id]=$(jq -r '.bri // 0' <<<"$normalized")
+    DEV_ON[$id]=$(jq -r '.on // false' <<<"$normalized")
+    DEV_PRESET[$id]=$(jq -r '.ps // 0' <<<"$normalized")
+    DEV_TRANSITION[$id]=$(jq -r '.transition // 0' <<<"$normalized")
+    DEV_NL_ON[$id]=$(jq -r '.nl.on // false' <<<"$normalized")
+    DEV_NL_DUR[$id]=$(jq -r '.nl.dur // 0' <<<"$normalized")
+    DEV_LIVE[$id]=$(jq -r '.live // false' <<<"$normalized")
+    DEVICE_LIST_DIRTY=1
+    if [[ "$id" == "$(current_device_id)" ]]; then
+      SEGMENTS=()
+      mapfile -t SEGMENTS < <(jq -c '.seg[]?' <<<"$normalized")
+      update_segment_texts
+    fi
+    changed=1
+  fi
+  if (( changed )); then
+    MODEL_DIRTY=1
+    return 0
+  fi
+  return 1
+}
+
+update_device_info() {
+  local id=$1
+  local info
+  info=$(api_get_info "$id" || true)
+  if [[ -z "$info" ]]; then
+    return 1
+  fi
+  local normalized
+  normalized=$(jq -cS '.' <<<"$info")
+  if [[ "${DEV_INFO_JSON[$id]:-}" == "$normalized" ]]; then
+    return 1
+  fi
+  DEV_INFO_JSON[$id]="$normalized"
+  DEV_VER[$id]=$(jq -r '.ver // ""' <<<"$normalized")
+  DEV_WIFI[$id]=$(jq -r '.wifi.signal // ""' <<<"$normalized")
+  DEV_UPTIME[$id]=$(jq -r '.uptime // ""' <<<"$normalized")
+  local wled_name
+  wled_name=$(jq -r '.name // ""' <<<"$normalized")
+  if [[ -n "$wled_name" && "${DEV_WLED_NAME[$id]:-}" != "$wled_name" ]]; then
+    DEV_WLED_NAME[$id]="$wled_name"
+    model_save_devices
+  fi
+  DEV_INFO_TS[$id]=$(now_ts)
+  MODEL_DIRTY=1
+  return 0
+}
+
+refresh_device_info_if_needed() {
+  local id=$1
+  local now
+  now=$(now_ts)
+  local last=${DEV_INFO_TS[$id]:-0}
+  local wled_name=${DEV_WLED_NAME[$id]:-}
+  if [[ -z "$wled_name" || $(( now - last )) -ge $INFO_REFRESH_TTL ]]; then
+    update_device_info "$id"
+    return $?
+  fi
+  return 1
+}
+
+refresh_selected_device() {
+  local id=$1
+  local changed=0
+  if update_device_state "$id"; then
+    changed=1
+  fi
+  if refresh_device_info_if_needed "$id"; then
+    changed=1
+  fi
+  if (( changed )); then
+    LAST_REFRESH_SELECTED=$(now_ts)
+  fi
+}
+
+refresh_all_devices() {
+  local id
+  for id in "${DEVICE_IDS[@]}"; do
+    local now
+    now=$(now_ts)
+    local next=${DEV_NEXT_POLL[$id]:-0}
+    if (( now >= next )); then
+      update_device_state "$id" || true
+      if [[ "${DEV_ONLINE[$id]:-0}" == "1" ]]; then
+        refresh_device_info_if_needed "$id" || true
+      fi
+    fi
+  done
+}
+
+apply_state_payload() {
+  local id=$1 payload=$2
+  MODEL_BUSY=1
+  if api_set_state "$id" "$payload" >/dev/null; then
+    refresh_selected_device "$id"
+    MODEL_BUSY=0
+    UI_DIRTY=1
+    return 0
+  fi
+  MODEL_BUSY=0
+  return 1
+}
+
+current_device_id() {
+  if (( ${#DEVICE_IDS[@]} == 0 )); then
+    printf ''
+    return
+  fi
+  printf '%s' "${DEVICE_IDS[$SELECTED_DEVICE_INDEX]}"
+}
+
+box_top_line() {
+  local width=$1 title=$2
+  local inner=$((width-2))
+  if (( inner < 0 )); then
+    inner=0
+  fi
+  if [[ -z "$title" || $inner -eq 0 ]]; then
+    printf '+%s+' "$(printf '%*s' "$inner" | tr ' ' '-')"
+    return
+  fi
+  local text=" $title "
+  text=$(ui_trim_text "$text" "$inner")
+  local rest=$((inner-${#text}))
+  printf '+%s%s+' "$text" "$(printf '%*s' "$rest" | tr ' ' '-')"
+}
+
+box_bottom_line() {
+  local width=$1
+  local inner=$((width-2))
+  if (( inner < 0 )); then
+    inner=0
+  fi
+  printf '+%s+' "$(printf '%*s' "$inner" | tr ' ' '-')"
+}
+
+blank_line() {
+  local width=$1
+  printf '%*s' "$width" ''
+}
+
+set_right_line() {
+  local row=$1 width=$2 text=$3
+  if (( row < 0 || row >= FRAME_INNER_ROWS )); then
+    return
+  fi
+  RIGHT_LINES[$row]=$(ui_pad_text "$text" "$width")
+}
+
+set_right_list_line() {
+  local row=$1 width=$2 text=$3 selected=$4 dimmed=$5
+  if (( row < 0 || row >= FRAME_INNER_ROWS )); then
+    return
+  fi
+  RIGHT_LINES[$row]=$(ui_format_list_item "$text" "$width" "$selected" "$dimmed")
+}
+
+update_segment_texts() {
+  SEGMENT_TEXT=()
+  SEGMENT_PRIMARY_COLOR=()
+  local i seg on bri col_vals
+  for i in "${!SEGMENTS[@]}"; do
+    seg=${SEGMENTS[$i]}
+    on=$(jq -r '.on // false' <<<"$seg")
+    bri=$(jq -r '.bri // 0' <<<"$seg")
+    col_vals=$(jq -r '.col[0] | @csv' <<<"$seg" | tr -d '"')
+    SEGMENT_TEXT[$i]="Seg $i on:$on bri:$bri"
+    SEGMENT_PRIMARY_COLOR[$i]="$col_vals"
+  done
+  SEGMENTS_CACHE_DIRTY=1
+}
+
+rebuild_device_cache() {
+  LEFT_ROW_NORMAL=()
+  LEFT_ROW_SELECTED=()
+  local i id name status bri preset on marker line
+  for i in "${!DEVICE_IDS[@]}"; do
+    id=${DEVICE_IDS[$i]}
+    name=$(device_display_name "$id")
+    status=${DEV_ONLINE[$id]:-0}
+    bri=${DEV_BRI[$id]:-0}
+    preset=${DEV_PRESET[$id]:-0}
+    on=${DEV_ON[$id]:-false}
+    marker="off"
+    if [[ "$on" == "true" ]]; then
+      marker="on"
+    fi
+    line="${name:0:16} ${marker} bri:${bri} ps:${preset}"
+    LEFT_ROW_NORMAL[$i]=$(ui_format_list_item "$line" "$LEFT_INNER_WIDTH" 0 $(( status == 0 )))
+    LEFT_ROW_SELECTED[$i]=$(ui_format_list_item "$line" "$LEFT_INNER_WIDTH" 1 0)
+  done
+  LEFT_CACHE_WIDTH=$LEFT_INNER_WIDTH
+  DEVICE_LIST_DIRTY=0
+}
+
+rebuild_presets_cache() {
+  PRESETS_ROW_NORMAL=()
+  PRESETS_ROW_SELECTED=()
+  local i line
+  for i in "${!PRESETS_IDS[@]}"; do
+    printf -v line '%4s  %s' "${PRESETS_IDS[$i]}" "${PRESETS_NAMES[$i]}"
+    PRESETS_ROW_NORMAL[$i]=$(ui_format_list_item "$line" "$RIGHT_INNER_WIDTH" 0 0)
+    PRESETS_ROW_SELECTED[$i]=$(ui_format_list_item "$line" "$RIGHT_INNER_WIDTH" 1 0)
+  done
+  RIGHT_CACHE_WIDTH=$RIGHT_INNER_WIDTH
+  PRESETS_CACHE_DIRTY=0
+}
+
+rebuild_effects_cache() {
+  EFFECTS_ROW_NORMAL=()
+  EFFECTS_ROW_SELECTED=()
+  local i line
+  for i in "${!EFFECTS[@]}"; do
+    line="$i: ${EFFECTS[$i]}"
+    EFFECTS_ROW_NORMAL[$i]=$(ui_format_list_item "$line" "$RIGHT_INNER_WIDTH" 0 0)
+    EFFECTS_ROW_SELECTED[$i]=$(ui_format_list_item "$line" "$RIGHT_INNER_WIDTH" 1 0)
+  done
+  RIGHT_CACHE_WIDTH=$RIGHT_INNER_WIDTH
+  EFFECTS_CACHE_DIRTY=0
+}
+
+rebuild_palettes_cache() {
+  PALETTES_ROW_NORMAL=()
+  PALETTES_ROW_SELECTED=()
+  local i line
+  for i in "${!PALETTES[@]}"; do
+    line="$i: ${PALETTES[$i]}"
+    PALETTES_ROW_NORMAL[$i]=$(ui_format_list_item "$line" "$RIGHT_INNER_WIDTH" 0 0)
+    PALETTES_ROW_SELECTED[$i]=$(ui_format_list_item "$line" "$RIGHT_INNER_WIDTH" 1 0)
+  done
+  RIGHT_CACHE_WIDTH=$RIGHT_INNER_WIDTH
+  PALETTES_CACHE_DIRTY=0
+}
+
+rebuild_segments_cache() {
+  SEGMENTS_ROW_NORMAL=()
+  SEGMENTS_ROW_SELECTED=()
+  local i line
+  for i in "${!SEGMENT_TEXT[@]}"; do
+    line="${SEGMENT_TEXT[$i]}"
+    SEGMENTS_ROW_NORMAL[$i]=$(ui_format_list_item "$line" "$RIGHT_INNER_WIDTH" 0 0)
+    SEGMENTS_ROW_SELECTED[$i]=$(ui_format_list_item "$line" "$RIGHT_INNER_WIDTH" 1 0)
+  done
+  RIGHT_CACHE_WIDTH=$RIGHT_INNER_WIDTH
+  SEGMENTS_CACHE_DIRTY=0
+}
+
+mark_dirty_row() {
+  local row=$1
+  render_mark_dirty "$row"
+}
+
+binding_desc_for_key() {
+  local key=$1
+  local scope=${2:-}
+  local entry
+  for entry in "${KEYBINDINGS[@]}"; do
+    local entry_scope entry_key entry_seq entry_desc
+    IFS='|' read -r entry_scope entry_key entry_seq entry_desc <<<"$entry"
+    if [[ "$entry_key" == "$key" ]]; then
+      if [[ -z "$scope" || "$entry_scope" == "$scope" ]]; then
+        printf '%s' "$entry_desc"
+        return
+      fi
+    fi
+  done
+}
+
+build_help_lines() {
+  HELP_LINES=()
+  local scope
+  for scope in "${KEYBINDING_SCOPES[@]}"; do
+    local added=0
+    local entry
+    for entry in "${KEYBINDINGS[@]}"; do
+      local entry_scope entry_key entry_seq entry_desc
+      IFS='|' read -r entry_scope entry_key entry_seq entry_desc <<<"$entry"
+      if [[ "$entry_scope" != "$scope" ]]; then
+        continue
+      fi
+      if (( added == 0 )); then
+        HELP_LINES+=("$scope")
+        added=1
+      fi
+      local display
+      display=$(format_key_label "$entry_key")
+      if [[ -n "$entry_seq" && "$entry_seq" != "$entry_key" ]]; then
+        display+=" ($entry_seq)"
+      fi
+      local line
+      printf -v line "  %-24s %s" "$display" "$entry_desc"
+      HELP_LINES+=("$line")
+    done
+    if (( added )); then
+      HELP_LINES+=("")
+    fi
+  done
+  if (( ${#HELP_LINES[@]} > 0 )) && [[ "${HELP_LINES[-1]}" == "" ]]; then
+    unset 'HELP_LINES[-1]'
+  fi
+}
+
+format_key_label() {
+  local key=$1
+  case "$key" in
+    Tab) key="tab" ;;
+    Shift-Tab) key="shift+tab" ;;
+    Enter) key="enter" ;;
+    Esc|ESC) key="esc" ;;
+  esac
+  key=${key//" / "/"/"}
+  printf '(%s)' "$key"
+}
+
+current_tab_scope() {
+  case "$TAB_INDEX" in
+    0) printf 'Status tab' ;;
+    1) printf 'Presets tab' ;;
+    2) printf 'Effects tab' ;;
+    3) printf 'Palettes tab' ;;
+    4) printf 'Segments tab' ;;
+    5) printf 'Advanced tab' ;;
+  esac
+}
+
+build_footer_hint() {
+  local tab_scope
+  tab_scope=$(current_tab_scope)
+  local parts=()
+
+  local desc
+  desc=$(binding_desc_for_key "q" "Global")
+  [[ -n "$desc" ]] && parts+=("$(format_key_label "q") $desc")
+  desc=$(binding_desc_for_key "Tab" "Global")
+  [[ -n "$desc" ]] && parts+=("$(format_key_label "Tab") $desc")
+  desc=$(binding_desc_for_key "Shift-Tab" "Global")
+  [[ -n "$desc" ]] && parts+=("$(format_key_label "Shift-Tab") $desc")
+  desc=$(binding_desc_for_key "↑ / ↓" "Lists")
+  [[ -n "$desc" ]] && parts+=("$(format_key_label "↑ / ↓") $desc")
+  desc=$(binding_desc_for_key "Enter" "$tab_scope")
+  [[ -n "$desc" ]] && parts+=("$(format_key_label "Enter") $desc")
+  case "$TAB_INDEX" in
+    0|2|4|5)
+      desc=$(binding_desc_for_key "← / →" "$tab_scope")
+      [[ -n "$desc" ]] && parts+=("$(format_key_label "← / →") $desc")
+      ;;
+  esac
+  case "$TAB_INDEX" in
+    2)
+      desc=$(binding_desc_for_key "i" "Effects tab")
+      [[ -n "$desc" ]] && parts+=("$(format_key_label "i") $desc")
+      ;;
+    4)
+      desc=$(binding_desc_for_key "c" "Segments tab")
+      [[ -n "$desc" ]] && parts+=("$(format_key_label "c") $desc")
+      desc=$(binding_desc_for_key "g" "Segments tab")
+      [[ -n "$desc" ]] && parts+=("$(format_key_label "g") $desc")
+      ;;
+    5)
+      desc=$(binding_desc_for_key "l" "Global")
+      [[ -n "$desc" ]] && parts+=("$(format_key_label "l") $desc")
+      desc=$(binding_desc_for_key "b" "Global")
+      [[ -n "$desc" ]] && parts+=("$(format_key_label "b") $desc")
+      ;;
+  esac
+  desc=$(binding_desc_for_key "r" "Global")
+  [[ -n "$desc" ]] && parts+=("$(format_key_label "r") $desc")
+  desc=$(binding_desc_for_key "s" "Global")
+  [[ -n "$desc" ]] && parts+=("$(format_key_label "s") $desc")
+  desc=$(binding_desc_for_key "?" "Global")
+  [[ -n "$desc" ]] && parts+=("$(format_key_label "?") $desc")
+
+  local IFS='  '
+  printf '%s' "${parts[*]}"
+}
+
+update_topbar_line() {
+  local cols=$RENDER_COLS
+  local id
+  id=$(current_device_id)
+  local topbar_status="| No device"
+  if [[ -n "$id" ]]; then
+    local conn="offline"
+    if [[ "${DEV_ONLINE[$id]:-0}" == "1" ]]; then
+      conn="online"
+    fi
+    topbar_status="| $(device_display_name "$id") ($conn)"
+  fi
+  FRAME_LINES[0]=$(ui_format_topbar "$cols" "$APP_NAME" "$topbar_status")
+  mark_dirty_row 0
+}
+
+update_inner_row() {
+  local row=$1
+  if (( row < 0 || row >= FRAME_INNER_ROWS )); then
+    return
+  fi
+  FRAME_LINES[$((row+2))]="|${LEFT_LINES[$row]}||${RIGHT_LINES[$row]}|"
+  mark_dirty_row $((row+2))
+}
+
+update_list_selection() {
+  local -n normal=$1
+  local -n selected=$2
+  local prev=$3
+  local next=$4
+  if (( prev == next )); then
+    return
+  fi
+  if (( prev >= 0 && prev < FRAME_INNER_ROWS )); then
+    LEFT_LINES[$prev]="${normal[$prev]:-$(blank_line "$LEFT_INNER_WIDTH")}"
+    update_inner_row "$prev"
+  fi
+  if (( next >= 0 && next < FRAME_INNER_ROWS )); then
+    LEFT_LINES[$next]="${selected[$next]:-$(blank_line "$LEFT_INNER_WIDTH")}"
+    update_inner_row "$next"
+  fi
+}
+
+update_right_list_selection() {
+  local -n normal=$1
+  local -n selected=$2
+  local prev=$3
+  local next=$4
+  if (( prev == next )); then
+    return
+  fi
+  if (( prev >= 0 && prev < FRAME_INNER_ROWS )); then
+    RIGHT_LINES[$prev]="${normal[$prev]:-$(blank_line "$RIGHT_INNER_WIDTH")}"
+    update_inner_row "$prev"
+  fi
+  if (( next >= 0 && next < FRAME_INNER_ROWS )); then
+    RIGHT_LINES[$next]="${selected[$next]:-$(blank_line "$RIGHT_INNER_WIDTH")}"
+    update_inner_row "$next"
+  fi
+}
+
+refresh_status_pane() {
+  local id=$1
+  build_status_lines "$id" "$RIGHT_INNER_WIDTH"
+  local rows=(0 1 2 3 5 6 7 9)
+  local row
+  for row in "${rows[@]}"; do
+    if (( row >= 0 && row < FRAME_INNER_ROWS )); then
+      update_inner_row "$row"
+    fi
+  done
+}
+
+refresh_advanced_pane() {
+  local id=$1
+  build_advanced_lines "$id" "$RIGHT_INNER_WIDTH"
+  local row
+  for row in 0 1 2 3; do
+    if (( row >= 0 && row < FRAME_INNER_ROWS )); then
+      update_inner_row "$row"
+    fi
+  done
+}
+
+refresh_segments_info() {
+  if (( ${#SEGMENT_TEXT[@]} == 0 )); then
+    return
+  fi
+  local seg_info_row=$(( ${#SEGMENT_TEXT[@]} < FRAME_INNER_ROWS ? ${#SEGMENT_TEXT[@]} : FRAME_INNER_ROWS ))
+  local col_vals="${SEGMENT_PRIMARY_COLOR[$SEGMENT_INDEX]:-}"
+  if (( seg_info_row + 1 < FRAME_INNER_ROWS )); then
+    RIGHT_LINES[$((seg_info_row+1))]=$(ui_pad_text "Primary color RGB: $col_vals (channel $COLOR_CHANNEL, toggle c)" "$RIGHT_INNER_WIDTH")
+    update_inner_row $((seg_info_row+1))
+  fi
+  if (( seg_info_row + 2 < FRAME_INNER_ROWS )); then
+    RIGHT_LINES[$((seg_info_row+2))]=$(ui_pad_text "Apply to all segments: $SEG_APPLY_ALL (toggle g)" "$RIGHT_INNER_WIDTH")
+    update_inner_row $((seg_info_row+2))
+  fi
+}
+
+build_status_lines() {
+  local id=$1 width=$2
+  local name
+  name=$(device_display_name "$id")
+  local ver=${DEV_VER[$id]}
+  local wifi=${DEV_WIFI[$id]}
+  local uptime=${DEV_UPTIME[$id]}
+  local on=${DEV_ON[$id]}
+  local bri=${DEV_BRI[$id]}
+  local preset=${DEV_PRESET[$id]}
+  set_right_line 0 "$width" "Device: $name"
+  set_right_line 1 "$width" "Version: $ver"
+  set_right_line 2 "$width" "WiFi signal: $wifi"
+  set_right_line 3 "$width" "Uptime: $uptime"
+  set_right_line 5 "$width" "Power: $on (Enter toggles)"
+  set_right_line 6 "$width" "Brightness: $bri (Left/Right)"
+  set_right_line 7 "$width" "Preset: $preset"
+  if (( LAST_REFRESH_SELECTED > 0 )); then
+    set_right_line 9 "$width" "Last refresh: $LAST_REFRESH_SELECTED"
+  fi
+}
+
+build_presets_lines_locked() {
+  local width=$1
+  if [[ ${#PRESETS_IDS[@]} -eq 0 ]]; then
+    set_right_line 0 "$width" "No presets loaded."
+    return
+  fi
+  local i row=0
+  for i in "${!PRESETS_IDS[@]}"; do
+    (( row >= FRAME_INNER_ROWS )) && break
+    local line
+    printf -v line '%4s  %s' "${PRESETS_IDS[$i]}" "${PRESETS_NAMES[$i]}"
+    set_right_list_line "$row" "$width" "$line" $(( i == PRESET_INDEX )) 0
+    row=$((row+1))
+  done
+}
+
+build_presets_lines() {
+  local width=$1
+  with_lock "$PRESETS_LOCK" build_presets_lines_locked "$width"
+}
+
+build_effects_lines() {
+  local width=$1
+  if [[ ${#EFFECTS[@]} -eq 0 ]]; then
+    set_right_line 0 "$width" "No effects loaded."
+    return
+  fi
+  local i row=0
+  for i in "${!EFFECTS[@]}"; do
+    (( row >= FRAME_INNER_ROWS )) && break
+    local line="$i: ${EFFECTS[$i]}"
+    set_right_list_line "$row" "$width" "$line" $(( i == EFFECT_INDEX )) 0
+    row=$((row+1))
+  done
+  local info_row=$((row+1))
+  set_right_line "$info_row" "$width" "Segment $SEGMENT_INDEX | Adjust $EFFECT_PARAM with Left/Right, toggle with i"
+}
+
+build_palettes_lines() {
+  local width=$1
+  if [[ ${#PALETTES[@]} -eq 0 ]]; then
+    set_right_line 0 "$width" "No palettes loaded."
+    return
+  fi
+  local i row=0
+  for i in "${!PALETTES[@]}"; do
+    (( row >= FRAME_INNER_ROWS )) && break
+    local line="$i: ${PALETTES[$i]}"
+    set_right_list_line "$row" "$width" "$line" $(( i == PALETTE_INDEX )) 0
+    row=$((row+1))
+  done
+  local info_row=$((row+1))
+  set_right_line "$info_row" "$width" "Segment $SEGMENT_INDEX"
+}
+
+build_segments_lines() {
+  local width=$1
+  if [[ ${#SEGMENTS[@]} -eq 0 ]]; then
+    set_right_line 0 "$width" "No segments available."
+    return
+  fi
+  local i row=0
+  for i in "${!SEGMENTS[@]}"; do
+    (( row >= FRAME_INNER_ROWS )) && break
+    local line="${SEGMENT_TEXT[$i]:-Seg $i}"
+    set_right_list_line "$row" "$width" "$line" $(( i == SEGMENT_INDEX )) 0
+    row=$((row+1))
+  done
+  local col_vals="${SEGMENT_PRIMARY_COLOR[$SEGMENT_INDEX]:-}"
+  if [[ -n "$col_vals" ]]; then
+    set_right_line $((row+1)) "$width" "Primary color RGB: $col_vals (channel $COLOR_CHANNEL, toggle c)"
+    set_right_line $((row+2)) "$width" "Apply to all segments: $SEG_APPLY_ALL (toggle g)"
+  fi
+}
+
+build_advanced_lines() {
+  local id=$1 width=$2
+  local state=${DEV_STATE_JSON[$id]}
+  if [[ -z "$state" ]]; then
+    set_right_line 0 "$width" "No state loaded."
+    return
+  fi
+  local transition=${DEV_TRANSITION[$id]:-0}
+  local night_on=${DEV_NL_ON[$id]:-false}
+  local night_dur=${DEV_NL_DUR[$id]:-0}
+  local live=${DEV_LIVE[$id]:-false}
+  set_right_line 0 "$width" "Transition: $transition (Left/Right)"
+  set_right_line 1 "$width" "Nightlight: $night_on dur:$night_dur (Enter toggles)"
+  set_right_line 2 "$width" "Live mode: $live (l toggles)"
+  set_right_line 3 "$width" "Reboot: press b"
+}
+
+overlay_help() {
+  local rows=$1 cols=$2
+  local lines=("${HELP_LINES[@]}")
+  local max_len=0
+  local line
+  for line in "${lines[@]}"; do
+    if (( ${#line} > max_len )); then
+      max_len=${#line}
+    fi
+  done
+  local width=$((max_len + 4))
+  if (( width + 4 > cols )); then
+    width=$((cols-4))
+  fi
+  local height=$(( ${#lines[@]} + 4 ))
+  if (( width < 10 || height >= rows )); then
+    return
+  fi
+  local row=$(( rows-height-1 ))
+  if (( row < 2 )); then
+    row=2
+  fi
+  local col=$(( (cols-width)/2 ))
+  if (( col < 1 )); then
+    col=1
+  fi
+  local inner=$((width-2))
+  local i
+  for ((i=0; i<height; i++)); do
+    local overlay_line
+    if (( i == 0 )); then
+      overlay_line=$(box_top_line "$width" " Help ")
+    elif (( i == height-1 )); then
+      overlay_line=$(box_bottom_line "$width")
+    else
+      local content=''
+      local idx=$((i-2))
+      if (( idx >= 0 && idx < ${#lines[@]} )); then
+        content="  ${lines[$idx]}"
+      fi
+      content=$(ui_pad_text "$content" "$inner")
+      overlay_line="|${content}|"
+    fi
+    local prefix
+    prefix=$(printf '%*s' "$col")
+    local suffix
+    suffix=$(printf '%*s' "$((cols-col-width))")
+    FRAME_LINES[$((row+i))]="${prefix}${overlay_line}${suffix}"
+  done
+}
+
+build_frame() {
+  local rows=$RENDER_ROWS cols=$RENDER_COLS
+  local left_width=32
+  if (( cols < 70 )); then
+    left_width=$((cols/2))
+  fi
+  if (( left_width < 10 )); then
+    left_width=10
+  fi
+  local right_width=$((cols-left_width))
+  if (( right_width < 10 )); then
+    right_width=10
+    left_width=$((cols-right_width))
+  fi
+  if (( left_width < 4 )); then
+    left_width=4
+    right_width=$((cols-left_width))
+  fi
+  LEFT_INNER_WIDTH=$((left_width-2))
+  RIGHT_INNER_WIDTH=$((right_width-2))
+  if (( LEFT_INNER_WIDTH < 1 )); then
+    LEFT_INNER_WIDTH=1
+  fi
+  if (( RIGHT_INNER_WIDTH < 1 )); then
+    RIGHT_INNER_WIDTH=1
+  fi
+  FRAME_INNER_ROWS=$((rows-3))
+  if (( FRAME_INNER_ROWS < 0 )); then
+    FRAME_INNER_ROWS=0
+  fi
+
+  if (( DEVICE_LIST_DIRTY || LEFT_CACHE_WIDTH != LEFT_INNER_WIDTH )); then
+    rebuild_device_cache
+  fi
+  if (( RIGHT_CACHE_WIDTH != RIGHT_INNER_WIDTH )); then
+    PRESETS_CACHE_DIRTY=1
+    EFFECTS_CACHE_DIRTY=1
+    PALETTES_CACHE_DIRTY=1
+    SEGMENTS_CACHE_DIRTY=1
+  fi
+  if (( PRESETS_CACHE_DIRTY )); then
+    rebuild_presets_cache
+  fi
+  if (( EFFECTS_CACHE_DIRTY )); then
+    rebuild_effects_cache
+  fi
+  if (( PALETTES_CACHE_DIRTY )); then
+    rebuild_palettes_cache
+  fi
+  if (( SEGMENTS_CACHE_DIRTY )); then
+    rebuild_segments_cache
+  fi
+
+  FRAME_LINES=()
+  local topbar_status="| No device"
+  local id
+  id=$(current_device_id)
+  if [[ -n "$id" ]]; then
+    local conn="offline"
+    if [[ "${DEV_ONLINE[$id]:-0}" == "1" ]]; then
+      conn="online"
+    fi
+    topbar_status="| $(device_display_name "$id") ($conn)"
+  fi
+  FRAME_LINES[0]=$(ui_format_topbar "$cols" "$APP_NAME" "$topbar_status")
+
+  LEFT_LINES=()
+  RIGHT_LINES=()
+  local i
+  for ((i=0; i<FRAME_INNER_ROWS; i++)); do
+    LEFT_LINES[$i]=$(blank_line "$LEFT_INNER_WIDTH")
+    RIGHT_LINES[$i]=$(blank_line "$RIGHT_INNER_WIDTH")
+  done
+
+  for ((i=0; i<FRAME_INNER_ROWS; i++)); do
+    if (( i < ${#DEVICE_IDS[@]} )); then
+      if (( i == SELECTED_DEVICE_INDEX )); then
+        LEFT_LINES[$i]="${LEFT_ROW_SELECTED[$i]}"
+      else
+        LEFT_LINES[$i]="${LEFT_ROW_NORMAL[$i]}"
+      fi
+    fi
+  done
+
+  if [[ -n "$id" ]]; then
+    case "$TAB_INDEX" in
+      0)
+        build_status_lines "$id" "$RIGHT_INNER_WIDTH"
+        ;;
+      1)
+        if (( ${#PRESETS_IDS[@]} == 0 )); then
+          RIGHT_LINES[0]=$(ui_pad_text "No presets loaded." "$RIGHT_INNER_WIDTH")
+        else
+          for ((i=0; i<FRAME_INNER_ROWS; i++)); do
+            if (( i < ${#PRESETS_IDS[@]} )); then
+              if (( i == PRESET_INDEX )); then
+                RIGHT_LINES[$i]="${PRESETS_ROW_SELECTED[$i]}"
+              else
+                RIGHT_LINES[$i]="${PRESETS_ROW_NORMAL[$i]}"
+              fi
+            fi
+          done
+        fi
+        ;;
+      2)
+        if (( ${#EFFECTS[@]} == 0 )); then
+          RIGHT_LINES[0]=$(ui_pad_text "No effects loaded." "$RIGHT_INNER_WIDTH")
+        else
+          for ((i=0; i<FRAME_INNER_ROWS; i++)); do
+            if (( i < ${#EFFECTS[@]} )); then
+              if (( i == EFFECT_INDEX )); then
+                RIGHT_LINES[$i]="${EFFECTS_ROW_SELECTED[$i]}"
+              else
+                RIGHT_LINES[$i]="${EFFECTS_ROW_NORMAL[$i]}"
+              fi
+            fi
+          done
+          local info_row=$(( ${#EFFECTS[@]} < FRAME_INNER_ROWS ? ${#EFFECTS[@]} : FRAME_INNER_ROWS ))
+          if (( info_row + 1 < FRAME_INNER_ROWS )); then
+            RIGHT_LINES[$((info_row+1))]=$(ui_pad_text "Segment $SEGMENT_INDEX | Adjust $EFFECT_PARAM with Left/Right, toggle with i" "$RIGHT_INNER_WIDTH")
+          fi
+        fi
+        ;;
+      3)
+        if (( ${#PALETTES[@]} == 0 )); then
+          RIGHT_LINES[0]=$(ui_pad_text "No palettes loaded." "$RIGHT_INNER_WIDTH")
+        else
+          for ((i=0; i<FRAME_INNER_ROWS; i++)); do
+            if (( i < ${#PALETTES[@]} )); then
+              if (( i == PALETTE_INDEX )); then
+                RIGHT_LINES[$i]="${PALETTES_ROW_SELECTED[$i]}"
+              else
+                RIGHT_LINES[$i]="${PALETTES_ROW_NORMAL[$i]}"
+              fi
+            fi
+          done
+          local pal_info_row=$(( ${#PALETTES[@]} < FRAME_INNER_ROWS ? ${#PALETTES[@]} : FRAME_INNER_ROWS ))
+          if (( pal_info_row + 1 < FRAME_INNER_ROWS )); then
+            RIGHT_LINES[$((pal_info_row+1))]=$(ui_pad_text "Segment $SEGMENT_INDEX" "$RIGHT_INNER_WIDTH")
+          fi
+        fi
+        ;;
+      4)
+        if (( ${#SEGMENT_TEXT[@]} == 0 )); then
+          RIGHT_LINES[0]=$(ui_pad_text "No segments available." "$RIGHT_INNER_WIDTH")
+        else
+          for ((i=0; i<FRAME_INNER_ROWS; i++)); do
+            if (( i < ${#SEGMENT_TEXT[@]} )); then
+              if (( i == SEGMENT_INDEX )); then
+                RIGHT_LINES[$i]="${SEGMENTS_ROW_SELECTED[$i]}"
+              else
+                RIGHT_LINES[$i]="${SEGMENTS_ROW_NORMAL[$i]}"
+              fi
+            fi
+          done
+          local seg_info_row=$(( ${#SEGMENT_TEXT[@]} < FRAME_INNER_ROWS ? ${#SEGMENT_TEXT[@]} : FRAME_INNER_ROWS ))
+          if (( seg_info_row + 1 < FRAME_INNER_ROWS )); then
+            local col_vals="${SEGMENT_PRIMARY_COLOR[$SEGMENT_INDEX]:-}"
+            RIGHT_LINES[$((seg_info_row+1))]=$(ui_pad_text "Primary color RGB: $col_vals (channel $COLOR_CHANNEL, toggle c)" "$RIGHT_INNER_WIDTH")
+          fi
+          if (( seg_info_row + 2 < FRAME_INNER_ROWS )); then
+            RIGHT_LINES[$((seg_info_row+2))]=$(ui_pad_text "Apply to all segments: $SEG_APPLY_ALL (toggle g)" "$RIGHT_INNER_WIDTH")
+          fi
+        fi
+        ;;
+      5)
+        build_advanced_lines "$id" "$RIGHT_INNER_WIDTH"
+        ;;
+    esac
+  fi
+
+  if (( rows > 2 )); then
+    FRAME_LINES[1]="$(box_top_line "$left_width" " Devices ")$(box_top_line "$right_width" " ${TAB_NAMES[$TAB_INDEX]} ")"
+  fi
+  for ((i=0; i<FRAME_INNER_ROWS; i++)); do
+    FRAME_LINES[$((i+2))]="|${LEFT_LINES[$i]}||${RIGHT_LINES[$i]}|"
+  done
+  if (( rows > 2 )); then
+    FRAME_LINES[$((rows-2))]="$(box_bottom_line "$left_width")$(box_bottom_line "$right_width")"
+  fi
+
+  if (( SHOW_HELP )); then
+    if (( ${#HELP_LINES[@]} == 0 )); then
+      build_help_lines
+    fi
+    overlay_help "$rows" "$cols"
+  fi
+
+  if (( rows > 0 )); then
+    local footer_hint
+    footer_hint=$(build_footer_hint)
+    FRAME_LINES[$((rows-1))]=$(ui_format_footer "$cols" "$footer_hint")
+  fi
+}
+
+handle_key() {
+  local key=$1
+  local id
+  id=$(current_device_id)
+
+  case "$key" in
+    q)
+      exit 0
+      ;;
+    $'\t')
+      TAB_INDEX=$(( (TAB_INDEX + 1) % ${#TAB_NAMES[@]} ))
+      if [[ -n "$id" ]]; then
+        case "$TAB_INDEX" in
+          1) fetch_presets "$id" ;;
+          2) fetch_effects "$id" ;;
+          3) fetch_palettes "$id" ;;
+        esac
+      fi
+      UI_DIRTY=1
+      ;;
+    $'\e[Z'|$'\e[1;2Z')
+      TAB_INDEX=$(( (TAB_INDEX - 1 + ${#TAB_NAMES[@]}) % ${#TAB_NAMES[@]} ))
+      UI_DIRTY=1
+      ;;
+    $'\e[A')
+      handle_up
+      ;;
+    $'\e[B')
+      handle_down
+      ;;
+    $'\e[D')
+      handle_left
+      UI_DIRTY=1
+      ;;
+    $'\e[C')
+      handle_right
+      UI_DIRTY=1
+      ;;
+    ''|$'\n'|$'\r')
+      handle_enter "$id"
+      UI_DIRTY=1
+      ;;
+    r)
+      [[ -n "$id" ]] && refresh_selected_device "$id"
+      UI_DIRTY=1
+      ;;
+    a)
+      handle_add_device
+      UI_DIRTY=1
+      ;;
+    d)
+      handle_delete_device
+      UI_DIRTY=1
+      ;;
+    e)
+      handle_edit_device
+      UI_DIRTY=1
+      ;;
+    s)
+      discover_devices
+      model_save_devices
+      UI_DIRTY=1
+      ;;
+    '?')
+      SHOW_HELP=$((1-SHOW_HELP))
+      UI_DIRTY=1
+      ;;
+    l)
+      handle_live_toggle "$id"
+      UI_DIRTY=1
+      ;;
+    i)
+      if [[ "$EFFECT_PARAM" == "speed" ]]; then
+        EFFECT_PARAM="intensity"
+      else
+        EFFECT_PARAM="speed"
+      fi
+      UI_DIRTY=1
+      ;;
+    c)
+      if (( TAB_INDEX == 4 )); then
+        COLOR_CHANNEL=$(( (COLOR_CHANNEL + 1) % 3 ))
+      fi
+      UI_DIRTY=1
+      ;;
+    '[')
+      if (( SELECTED_DEVICE_INDEX > 0 )); then
+        local prev=$SELECTED_DEVICE_INDEX
+        SELECTED_DEVICE_INDEX=$((SELECTED_DEVICE_INDEX-1))
+        update_list_selection LEFT_ROW_NORMAL LEFT_ROW_SELECTED "$prev" "$SELECTED_DEVICE_INDEX"
+        update_topbar_line
+        local id
+        id=$(current_device_id)
+        if [[ -n "$id" ]]; then
+          case "$TAB_INDEX" in
+            0) refresh_status_pane "$id" ;;
+            5) refresh_advanced_pane "$id" ;;
+          esac
+        fi
+      fi
+      ;;
+    ']')
+      if (( SELECTED_DEVICE_INDEX < ${#DEVICE_IDS[@]}-1 )); then
+        local prev=$SELECTED_DEVICE_INDEX
+        SELECTED_DEVICE_INDEX=$((SELECTED_DEVICE_INDEX+1))
+        update_list_selection LEFT_ROW_NORMAL LEFT_ROW_SELECTED "$prev" "$SELECTED_DEVICE_INDEX"
+        update_topbar_line
+        local id
+        id=$(current_device_id)
+        if [[ -n "$id" ]]; then
+          case "$TAB_INDEX" in
+            0) refresh_status_pane "$id" ;;
+            5) refresh_advanced_pane "$id" ;;
+          esac
+        fi
+      fi
+      ;;
+    b)
+      handle_reboot "$id"
+      UI_DIRTY=1
+      ;;
+    g)
+      if (( TAB_INDEX == 4 )); then
+        if (( SEG_APPLY_ALL )); then
+          SEG_APPLY_ALL=0
+        else
+          SEG_APPLY_ALL=1
+        fi
+      fi
+      UI_DIRTY=1
+      ;;
+  esac
+}
+
+handle_up() {
+  case "$TAB_INDEX" in
+    1)
+      local prev=$PRESET_INDEX
+      adjust_preset_index -1
+      update_right_list_selection PRESETS_ROW_NORMAL PRESETS_ROW_SELECTED "$prev" "$PRESET_INDEX"
+      ;;
+    2)
+      local prev=$EFFECT_INDEX
+      if (( EFFECT_INDEX > 0 )); then
+        EFFECT_INDEX=$((EFFECT_INDEX-1))
+        update_right_list_selection EFFECTS_ROW_NORMAL EFFECTS_ROW_SELECTED "$prev" "$EFFECT_INDEX"
+      fi
+      ;;
+    3)
+      local prev=$PALETTE_INDEX
+      if (( PALETTE_INDEX > 0 )); then
+        PALETTE_INDEX=$((PALETTE_INDEX-1))
+        update_right_list_selection PALETTES_ROW_NORMAL PALETTES_ROW_SELECTED "$prev" "$PALETTE_INDEX"
+      fi
+      ;;
+    4)
+      local prev=$SEGMENT_INDEX
+      if (( SEGMENT_INDEX > 0 )); then
+        SEGMENT_INDEX=$((SEGMENT_INDEX-1))
+        update_right_list_selection SEGMENTS_ROW_NORMAL SEGMENTS_ROW_SELECTED "$prev" "$SEGMENT_INDEX"
+        refresh_segments_info
+      fi
+      ;;
+    *)
+      local prev=$SELECTED_DEVICE_INDEX
+      if (( SELECTED_DEVICE_INDEX > 0 )); then
+        SELECTED_DEVICE_INDEX=$((SELECTED_DEVICE_INDEX-1))
+        update_list_selection LEFT_ROW_NORMAL LEFT_ROW_SELECTED "$prev" "$SELECTED_DEVICE_INDEX"
+        update_topbar_line
+        local id
+        id=$(current_device_id)
+        if [[ -n "$id" ]]; then
+          case "$TAB_INDEX" in
+            0) refresh_status_pane "$id" ;;
+            5) refresh_advanced_pane "$id" ;;
+          esac
+        fi
+      fi
+      ;;
+  esac
+}
+
+handle_down() {
+  case "$TAB_INDEX" in
+    1)
+      local prev=$PRESET_INDEX
+      adjust_preset_index 1
+      update_right_list_selection PRESETS_ROW_NORMAL PRESETS_ROW_SELECTED "$prev" "$PRESET_INDEX"
+      ;;
+    2)
+      local prev=$EFFECT_INDEX
+      if (( EFFECT_INDEX < ${#EFFECTS[@]}-1 )); then
+        EFFECT_INDEX=$((EFFECT_INDEX+1))
+        update_right_list_selection EFFECTS_ROW_NORMAL EFFECTS_ROW_SELECTED "$prev" "$EFFECT_INDEX"
+      fi
+      ;;
+    3)
+      local prev=$PALETTE_INDEX
+      if (( PALETTE_INDEX < ${#PALETTES[@]}-1 )); then
+        PALETTE_INDEX=$((PALETTE_INDEX+1))
+        update_right_list_selection PALETTES_ROW_NORMAL PALETTES_ROW_SELECTED "$prev" "$PALETTE_INDEX"
+      fi
+      ;;
+    4)
+      local prev=$SEGMENT_INDEX
+      if (( SEGMENT_INDEX < ${#SEGMENTS[@]}-1 )); then
+        SEGMENT_INDEX=$((SEGMENT_INDEX+1))
+        update_right_list_selection SEGMENTS_ROW_NORMAL SEGMENTS_ROW_SELECTED "$prev" "$SEGMENT_INDEX"
+        refresh_segments_info
+      fi
+      ;;
+    *)
+      local prev=$SELECTED_DEVICE_INDEX
+      if (( SELECTED_DEVICE_INDEX < ${#DEVICE_IDS[@]}-1 )); then
+        SELECTED_DEVICE_INDEX=$((SELECTED_DEVICE_INDEX+1))
+        update_list_selection LEFT_ROW_NORMAL LEFT_ROW_SELECTED "$prev" "$SELECTED_DEVICE_INDEX"
+        update_topbar_line
+        local id
+        id=$(current_device_id)
+        if [[ -n "$id" ]]; then
+          case "$TAB_INDEX" in
+            0) refresh_status_pane "$id" ;;
+            5) refresh_advanced_pane "$id" ;;
+          esac
+        fi
+      fi
+      ;;
+  esac
+}
+
+handle_left() {
+  local id
+  id=$(current_device_id)
+  [[ -z "$id" ]] && return
+  case "$TAB_INDEX" in
+    0)
+      local bri=${DEV_BRI[$id]:-0}
+      bri=$((bri-5))
+      bri=$(clamp "$bri" 0 255)
+      local payload
+      payload=$(jq -n --argjson bri "$bri" '{bri:$bri}')
+      apply_state_payload "$id" "$payload"
+      DEV_BRI[$id]="$bri"
+      ;;
+    5)
+      local state=${DEV_STATE_JSON[$id]}
+      local transition
+      transition=$(jq -r '.transition // 0' <<<"$state")
+      transition=$((transition-1))
+      transition=$(clamp "$transition" 0 255)
+      local payload
+      payload=$(jq -n --argjson transition "$transition" '{transition:$transition}')
+      apply_state_payload "$id" "$payload"
+      ;;
+    2)
+      local seg=${SEGMENTS[$SEGMENT_INDEX]}
+      [[ -z "$seg" ]] && return
+      local current
+      if [[ "$EFFECT_PARAM" == "speed" ]]; then
+        current=$(jq -r '.sx // 0' <<<"$seg")
+        current=$((current-5))
+        current=$(clamp "$current" 0 255)
+        local payload
+        if (( SEG_APPLY_ALL )); then
+          payload=$(jq -n --argjson sx "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,sx:$sx}],applyAll:true}')
+        else
+          payload=$(jq -n --argjson sx "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,sx:$sx}]}')
+        fi
+        apply_state_payload "$id" "$payload"
+      else
+        current=$(jq -r '.ix // 0' <<<"$seg")
+        current=$((current-5))
+        current=$(clamp "$current" 0 255)
+        local payload
+        if (( SEG_APPLY_ALL )); then
+          payload=$(jq -n --argjson ix "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,ix:$ix}],applyAll:true}')
+        else
+          payload=$(jq -n --argjson ix "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,ix:$ix}]}')
+        fi
+        apply_state_payload "$id" "$payload"
+      fi
+      ;;
+    4)
+      local seg=${SEGMENTS[$SEGMENT_INDEX]}
+      [[ -z "$seg" ]] && return
+      local r g b
+      r=$(jq -r '.col[0][0] // 0' <<<"$seg")
+      g=$(jq -r '.col[0][1] // 0' <<<"$seg")
+      b=$(jq -r '.col[0][2] // 0' <<<"$seg")
+      case "$COLOR_CHANNEL" in
+        0) r=$((r-5)); r=$(clamp "$r" 0 255) ;;
+        1) g=$((g-5)); g=$(clamp "$g" 0 255) ;;
+        2) b=$((b-5)); b=$(clamp "$b" 0 255) ;;
+      esac
+      local payload
+      if (( SEG_APPLY_ALL )); then
+        payload=$(jq -n --argjson r "$r" --argjson g "$g" --argjson b "$b" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}],applyAll:true}')
+      else
+        payload=$(jq -n --argjson id "$SEGMENT_INDEX" --argjson r "$r" --argjson g "$g" --argjson b "$b" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}]}')
+      fi
+      apply_state_payload "$id" "$payload"
+      ;;
+  esac
+}
+
+handle_right() {
+  local id
+  id=$(current_device_id)
+  [[ -z "$id" ]] && return
+  case "$TAB_INDEX" in
+    0)
+      local bri=${DEV_BRI[$id]:-0}
+      bri=$((bri+5))
+      bri=$(clamp "$bri" 0 255)
+      local payload
+      payload=$(jq -n --argjson bri "$bri" '{bri:$bri}')
+      apply_state_payload "$id" "$payload"
+      DEV_BRI[$id]="$bri"
+      ;;
+    5)
+      local state=${DEV_STATE_JSON[$id]}
+      local transition
+      transition=$(jq -r '.transition // 0' <<<"$state")
+      transition=$((transition+1))
+      transition=$(clamp "$transition" 0 255)
+      local payload
+      payload=$(jq -n --argjson transition "$transition" '{transition:$transition}')
+      apply_state_payload "$id" "$payload"
+      ;;
+    2)
+      local seg=${SEGMENTS[$SEGMENT_INDEX]}
+      [[ -z "$seg" ]] && return
+      local current
+      if [[ "$EFFECT_PARAM" == "speed" ]]; then
+        current=$(jq -r '.sx // 0' <<<"$seg")
+        current=$((current+5))
+        current=$(clamp "$current" 0 255)
+        local payload
+        if (( SEG_APPLY_ALL )); then
+          payload=$(jq -n --argjson sx "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,sx:$sx}],applyAll:true}')
+        else
+          payload=$(jq -n --argjson sx "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,sx:$sx}]}')
+        fi
+        apply_state_payload "$id" "$payload"
+      else
+        current=$(jq -r '.ix // 0' <<<"$seg")
+        current=$((current+5))
+        current=$(clamp "$current" 0 255)
+        local payload
+        if (( SEG_APPLY_ALL )); then
+          payload=$(jq -n --argjson ix "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,ix:$ix}],applyAll:true}')
+        else
+          payload=$(jq -n --argjson ix "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,ix:$ix}]}')
+        fi
+        apply_state_payload "$id" "$payload"
+      fi
+      ;;
+    4)
+      local seg=${SEGMENTS[$SEGMENT_INDEX]}
+      [[ -z "$seg" ]] && return
+      local r g b
+      r=$(jq -r '.col[0][0] // 0' <<<"$seg")
+      g=$(jq -r '.col[0][1] // 0' <<<"$seg")
+      b=$(jq -r '.col[0][2] // 0' <<<"$seg")
+      case "$COLOR_CHANNEL" in
+        0) r=$((r+5)); r=$(clamp "$r" 0 255) ;;
+        1) g=$((g+5)); g=$(clamp "$g" 0 255) ;;
+        2) b=$((b+5)); b=$(clamp "$b" 0 255) ;;
+      esac
+      local payload
+      if (( SEG_APPLY_ALL )); then
+        payload=$(jq -n --argjson r "$r" --argjson g "$g" --argjson b "$b" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}],applyAll:true}')
+      else
+        payload=$(jq -n --argjson id "$SEGMENT_INDEX" --argjson r "$r" --argjson g "$g" --argjson b "$b" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}]}')
+      fi
+      apply_state_payload "$id" "$payload"
+      ;;
+  esac
+}
+
+handle_enter() {
+  local id=$1
+  [[ -z "$id" ]] && return
+  case "$TAB_INDEX" in
+    0)
+      local on=${DEV_ON[$id]}
+      local new_on
+      if [[ "$on" == "true" ]]; then
+        new_on=false
+      else
+        new_on=true
+      fi
+      local payload
+      payload=$(jq -n --argjson on "$new_on" '{on:$on}')
+      apply_state_payload "$id" "$payload"
+      DEV_ON[$id]="$new_on"
+      ;;
+    1)
+      local preset_id
+      preset_id=$(with_lock "$PRESETS_LOCK" get_selected_preset_id)
+      if [[ -n "$preset_id" ]]; then
+        local payload
+        payload=$(jq -n --argjson ps "$preset_id" '{ps:$ps}')
+        apply_state_payload "$id" "$payload"
+        DEV_PRESET[$id]="$preset_id"
+        refresh_selected_device "$id"
+      fi
+      ;;
+    2)
+      if [[ -n "${EFFECTS[$EFFECT_INDEX]:-}" ]]; then
+        local payload
+        if (( SEG_APPLY_ALL )); then
+          payload=$(jq -n --argjson fx "$EFFECT_INDEX" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,fx:$fx}],applyAll:true}')
+        else
+          payload=$(jq -n --argjson fx "$EFFECT_INDEX" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,fx:$fx}]}')
+        fi
+        apply_state_payload "$id" "$payload"
+      fi
+      ;;
+    3)
+      if [[ -n "${PALETTES[$PALETTE_INDEX]:-}" ]]; then
+        local payload
+        if (( SEG_APPLY_ALL )); then
+          payload=$(jq -n --argjson pal "$PALETTE_INDEX" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,pal:$pal}],applyAll:true}')
+        else
+          payload=$(jq -n --argjson pal "$PALETTE_INDEX" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,pal:$pal}]}')
+        fi
+        apply_state_payload "$id" "$payload"
+      fi
+      ;;
+    4)
+      local seg=${SEGMENTS[$SEGMENT_INDEX]}
+      if [[ -n "$seg" ]]; then
+        local on
+        on=$(jq -r '.on // false' <<<"$seg")
+        local new_on
+        if [[ "$on" == "true" ]]; then
+          new_on=false
+        else
+          new_on=true
+        fi
+        local payload
+        if (( SEG_APPLY_ALL )); then
+          payload=$(jq -n --argjson on "$new_on" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,on:$on}],applyAll:true}')
+        else
+          payload=$(jq -n --argjson on "$new_on" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,on:$on}]}')
+        fi
+        apply_state_payload "$id" "$payload"
+      fi
+      ;;
+    5)
+      local state=${DEV_STATE_JSON[$id]}
+      local night_on
+      night_on=$(jq -r '.nl.on // false' <<<"$state")
+      local new_on
+      if [[ "$night_on" == "true" ]]; then
+        new_on=false
+      else
+        new_on=true
+      fi
+      local payload
+      payload=$(jq -n --argjson on "$new_on" '{nl:{on:$on}}')
+      apply_state_payload "$id" "$payload"
+      ;;
+  esac
+}
+
+handle_add_device() {
+  ui_clear
+  tput cup 2 2
+  local input
+  input=$(prompt_input 'Add device host:port: ')
+  if [[ -z "$input" ]]; then
+    FULL_REDRAW=1
+    return
+  fi
+  local host port
+  IFS=':' read -r host port <<<"$input"
+  port=${port:-80}
+  model_add_device "$host" "$host" "$port"
+  DEVICE_LIST_DIRTY=1
+  model_save_devices
+  FULL_REDRAW=1
+}
+
+handle_delete_device() {
+  local id
+  id=$(current_device_id)
+  [[ -z "$id" ]] && return
+  if confirm_prompt "Delete $(device_display_name "$id")?"; then
+    model_remove_device "$id"
+    DEVICE_LIST_DIRTY=1
+    model_save_devices
+    SELECTED_DEVICE_INDEX=0
+    UI_DIRTY=1
+  fi
+}
+
+handle_edit_device() {
+  local id
+  id=$(current_device_id)
+  [[ -z "$id" ]] && return
+  ui_clear
+  tput cup 2 2
+  local input
+  input=$(prompt_input "Edit device $(device_display_name "$id") host:port: ")
+  if [[ -z "$input" ]]; then
+    FULL_REDRAW=1
+    return
+  fi
+  local host port
+  IFS=':' read -r host port <<<"$input"
+  port=${port:-80}
+  local name="${DEV_NAME[$id]}"
+  local alias="${DEV_ALIAS[$id]:-}"
+  local wled_name="${DEV_WLED_NAME[$id]:-}"
+  model_remove_device "$id"
+  model_add_device "$name" "$host" "$port"
+  DEVICE_LIST_DIRTY=1
+  local new_id
+  new_id=$(device_id "$host" "$port")
+  DEV_ALIAS[$new_id]="$alias"
+  DEV_WLED_NAME[$new_id]="$wled_name"
+  model_save_devices
+  UI_DIRTY=1
+  FULL_REDRAW=1
+}
+
+handle_live_toggle() {
+  local id=$1
+  [[ -z "$id" ]] && return
+  local state=${DEV_STATE_JSON[$id]}
+  local live
+  live=$(jq -r '.live // false' <<<"$state")
+  local new_live
+  if [[ "$live" == "true" ]]; then
+    new_live=false
+  else
+    new_live=true
+  fi
+  local payload
+  payload=$(jq -n --argjson live "$new_live" '{live:$live}')
+  apply_state_payload "$id" "$payload"
+}
+
+handle_reboot() {
+  local id=$1
+  [[ -z "$id" ]] && return
+  if confirm_prompt "Reboot $(device_display_name "$id")?"; then
+    local payload
+    payload=$(jq -n '{rb:true}')
+    apply_state_payload "$id" "$payload"
+  fi
+}
+
+smoke_test() {
+  local target=$1
+  if [[ -z "$target" ]]; then
+    printf 'Usage: %s --smoke HOST:PORT\n' "$0" >&2
+    return 1
+  fi
+  local host port
+  IFS=':' read -r host port <<<"$target"
+  port=${port:-80}
+  if [[ -z "$host" ]]; then
+    printf 'Invalid target: %s\n' "$target" >&2
+    return 1
+  fi
+  model_add_device "$host" "$host" "$port"
+  local id
+  id=$(device_id "$host" "$port")
+
+  local info
+  if ! info=$(api_get_info "$id"); then
+    printf 'Failed to fetch /json/info from %s\n' "$target" >&2
+    return 1
+  fi
+  local name
+  name=$(jq -r '.name // ""' <<<"$info")
+  printf 'Name: %s\n' "$name"
+
+  local payload state
+  payload=$(jq -n --argjson on true '{on:$on}')
+  if ! api_set_state "$id" "$payload" >/dev/null; then
+    printf 'Failed to set power on %s\n' "$target" >&2
+    return 1
+  fi
+  if ! state=$(api_get_state "$id"); then
+    printf 'Failed to fetch /json/state after power change\n' >&2
+    return 1
+  fi
+  printf 'Power after on: %s\n' "$(jq -r '.on // false' <<<"$state")"
+
+  payload=$(jq -n --argjson bri 128 '{bri:$bri}')
+  if ! api_set_state "$id" "$payload" >/dev/null; then
+    printf 'Failed to set brightness on %s\n' "$target" >&2
+    return 1
+  fi
+  if ! state=$(api_get_state "$id"); then
+    printf 'Failed to fetch /json/state after brightness change\n' >&2
+    return 1
+  fi
+  printf 'Brightness after set: %s\n' "$(jq -r '.bri // 0' <<<"$state")"
+
+  local presets
+  presets=$(api_get_presets "$id" || true)
+  if [[ -n "$presets" ]]; then
+    local first_line preset_id
+    first_line=$(parse_presets_tsv <<<"$presets" 2>/dev/null | head -n1 || true)
+    preset_id=$(awk -F'\t' '{print $1}' <<<"$first_line")
+    if [[ -n "$preset_id" ]]; then
+      payload=$(jq -n --argjson ps "$preset_id" '{ps:$ps}')
+      if ! api_set_state "$id" "$payload" >/dev/null; then
+        printf 'Failed to apply preset %s on %s\n' "$preset_id" "$target" >&2
+        return 1
+      fi
+      if ! state=$(api_get_state "$id"); then
+        printf 'Failed to fetch /json/state after preset apply\n' >&2
+        return 1
+      fi
+      printf 'Preset after apply: %s\n' "$(jq -r '.ps // 0' <<<"$state")"
+    fi
+  fi
+}
+
+main_loop() {
+  model_load_devices
+  discover_devices
+  model_save_devices
+  DEVICE_LIST_DIRTY=1
+  ui_init
+  set_term_title "$APP_NAME"
+  trap 'RESIZED=1' WINCH
+
+  while true; do
+    local now
+    now=$(now_ts)
+    if (( MODEL_BUSY == 0 && now - LAST_POLL_ALL >= 8 )); then
+      refresh_all_devices
+      LAST_POLL_ALL=$now
+    fi
+    local id
+    id=$(current_device_id)
+    if [[ -n "$id" ]] && (( MODEL_BUSY == 0 && now - LAST_POLL_SELECTED >= 2 )); then
+      refresh_selected_device "$id"
+      LAST_POLL_SELECTED=$now
+    fi
+    if (( RESIZED )); then
+      render_set_size
+      RESIZED=0
+      FULL_REDRAW=1
+      UI_DIRTY=1
+    fi
+    if (( UI_DIRTY || MODEL_DIRTY || FULL_REDRAW )); then
+      build_frame
+      render_draw_frame FRAME_LINES
+      UI_DIRTY=0
+      MODEL_DIRTY=0
+    elif render_has_dirty; then
+      render_flush_dirty FRAME_LINES
+    fi
+    local key
+    key=$(read_key)
+    if [[ "$key" != "__NONE__" ]]; then
+      handle_key "$key"
+    fi
+  done
+}
+
+if [[ "${1:-}" == "--smoke" ]]; then
+  smoke_test "${2:-}"
+  exit $?
+fi
+
+main_loop
