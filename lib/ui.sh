@@ -65,6 +65,20 @@ ui_format_topbar() {
   fi
 }
 
+ui_format_footer() {
+  local cols=$1
+  local text=$2
+  local padded
+  text=$(ui_trim_text " $text" "$cols")
+  local pad=$((cols-${#text}))
+  padded="${text}$(printf '%*s' "$pad")"
+  if (( UI_COLOR )); then
+    printf '%s%s%s' "$UI_DIM_ON" "$padded" "$UI_SGR0"
+  else
+    printf '%s' "$padded"
+  fi
+}
+
 ui_format_list_item() {
   local text=$1 width=$2 selected=$3 dimmed=$4
   text=$(ui_trim_text "$text" "$width")
