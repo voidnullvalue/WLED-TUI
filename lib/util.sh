@@ -111,11 +111,19 @@ read_key() {
   fi
   if [[ "$key" == $'\e' ]]; then
     local rest
-    IFS= read -rsn2 -t 0.01 rest || rest=''
+    IFS= read -rsn1 -t 0.01 rest || rest=''
+    if [[ -z "$rest" ]]; then
+      printf '%s' "$key"
+      return
+    fi
     key+="$rest"
-    if [[ "$rest" == '[' ]]; then
-      IFS= read -rsn1 -t 0.01 rest || rest=''
-      key+="$rest"
+    if [[ "$rest" == '[' || "$rest" == 'O' ]]; then
+      while IFS= read -rsn1 -t 0.01 rest; do
+        key+="$rest"
+        if [[ "$rest" =~ [A-Za-z~] ]]; then
+          break
+        fi
+      done
     fi
   fi
   printf '%s' "$key"

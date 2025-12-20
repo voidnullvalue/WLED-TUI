@@ -42,7 +42,46 @@ LAST_POLL_ALL=0
 FRAME_INNER_ROWS=0
 LEFT_INNER_WIDTH=0
 RIGHT_INNER_WIDTH=0
-HINT_TEXT='q quit  Tab next  ↑↓ move  Enter apply  r refresh  s scan  ? help'
+KEYBINDINGS=(
+  "Global|q|q|Quit"
+  "Global|?|?|Toggle help"
+  "Global|Tab|Tab|Next tab"
+  "Global|Shift-Tab|ESC[Z/ESC[1;2Z]|Previous tab"
+  "Global|r|r|Refresh selected device"
+  "Global|s|s|Scan (Bonjour)"
+  "Global|l|l|Toggle live mode"
+  "Global|b|b|Reboot device"
+  "Devices|a|a|Add device"
+  "Devices|d|d|Delete device"
+  "Devices|e|e|Edit device"
+  "Devices|[ / ]|[ / ]|Prev/Next device"
+  "Lists|↑ / ↓|ESC[A/ESC[B]|Move selection"
+  "Status tab|Enter|CR/LF|Toggle power"
+  "Status tab|← / →|ESC[D/ESC[C]|Adjust brightness"
+  "Presets tab|Enter|CR/LF|Apply preset"
+  "Effects tab|Enter|CR/LF|Apply effect"
+  "Effects tab|← / →|ESC[D/ESC[C]|Adjust speed/intensity"
+  "Effects tab|i|i|Toggle speed/intensity"
+  "Palettes tab|Enter|CR/LF|Apply palette"
+  "Segments tab|Enter|CR/LF|Toggle segment"
+  "Segments tab|← / →|ESC[D/ESC[C]|Adjust RGB channel"
+  "Segments tab|c|c|Cycle RGB channel"
+  "Segments tab|g|g|Apply to all segments"
+  "Advanced tab|Enter|CR/LF|Toggle nightlight"
+  "Advanced tab|← / →|ESC[D/ESC[C]|Adjust transition"
+)
+KEYBINDING_SCOPES=(
+  "Global"
+  "Devices"
+  "Lists"
+  "Status tab"
+  "Presets tab"
+  "Effects tab"
+  "Palettes tab"
+  "Segments tab"
+  "Advanced tab"
+)
+HELP_LINES=()
 
 LEFT_ROW_NORMAL=()
 LEFT_ROW_SELECTED=()
@@ -464,17 +503,128 @@ mark_dirty_row() {
   render_mark_dirty "$row"
 }
 
+binding_desc_for_key() {
+  local key=$1
+  local scope=${2:-}
+  local entry
+  for entry in "${KEYBINDINGS[@]}"; do
+    local entry_scope entry_key entry_seq entry_desc
+    IFS='|' read -r entry_scope entry_key entry_seq entry_desc <<<"$entry"
+    if [[ "$entry_key" == "$key" ]]; then
+      if [[ -z "$scope" || "$entry_scope" == "$scope" ]]; then
+        printf '%s' "$entry_desc"
+        return
+      fi
+    fi
+  done
+}
+
+build_help_lines() {
+  HELP_LINES=()
+  local scope
+  for scope in "${KEYBINDING_SCOPES[@]}"; do
+    local added=0
+    local entry
+    for entry in "${KEYBINDINGS[@]}"; do
+      local entry_scope entry_key entry_seq entry_desc
+      IFS='|' read -r entry_scope entry_key entry_seq entry_desc <<<"$entry"
+      if [[ "$entry_scope" != "$scope" ]]; then
+        continue
+      fi
+      if (( added == 0 )); then
+        HELP_LINES+=("$scope")
+        added=1
+      fi
+      local display="$entry_key"
+      if [[ -n "$entry_seq" && "$entry_seq" != "$entry_key" ]]; then
+        display+=" ($entry_seq)"
+      fi
+      local line
+      printf -v line "  %-24s %s" "$display" "$entry_desc"
+      HELP_LINES+=("$line")
+    done
+    if (( added )); then
+      HELP_LINES+=("")
+    fi
+  done
+  if (( ${#HELP_LINES[@]} > 0 )) && [[ "${HELP_LINES[-1]}" == "" ]]; then
+    unset 'HELP_LINES[-1]'
+  fi
+}
+
+current_tab_scope() {
+  case "$TAB_INDEX" in
+    0) printf 'Status tab' ;;
+    1) printf 'Presets tab' ;;
+    2) printf 'Effects tab' ;;
+    3) printf 'Palettes tab' ;;
+    4) printf 'Segments tab' ;;
+    5) printf 'Advanced tab' ;;
+  esac
+}
+
+build_footer_hint() {
+  local tab_scope
+  tab_scope=$(current_tab_scope)
+  local parts=()
+
+  local desc
+  desc=$(binding_desc_for_key "q" "Global")
+  [[ -n "$desc" ]] && parts+=("q $desc")
+  desc=$(binding_desc_for_key "Tab" "Global")
+  [[ -n "$desc" ]] && parts+=("Tab $desc")
+  desc=$(binding_desc_for_key "Shift-Tab" "Global")
+  [[ -n "$desc" ]] && parts+=("Shift-Tab $desc")
+  desc=$(binding_desc_for_key "↑ / ↓" "Lists")
+  [[ -n "$desc" ]] && parts+=("↑↓ $desc")
+  desc=$(binding_desc_for_key "Enter" "$tab_scope")
+  [[ -n "$desc" ]] && parts+=("Enter $desc")
+  case "$TAB_INDEX" in
+    0|2|4|5)
+      desc=$(binding_desc_for_key "← / →" "$tab_scope")
+      [[ -n "$desc" ]] && parts+=("←→ $desc")
+      ;;
+  esac
+  case "$TAB_INDEX" in
+    2)
+      desc=$(binding_desc_for_key "i" "Effects tab")
+      [[ -n "$desc" ]] && parts+=("i $desc")
+      ;;
+    4)
+      desc=$(binding_desc_for_key "c" "Segments tab")
+      [[ -n "$desc" ]] && parts+=("c $desc")
+      desc=$(binding_desc_for_key "g" "Segments tab")
+      [[ -n "$desc" ]] && parts+=("g $desc")
+      ;;
+    5)
+      desc=$(binding_desc_for_key "l" "Global")
+      [[ -n "$desc" ]] && parts+=("l $desc")
+      desc=$(binding_desc_for_key "b" "Global")
+      [[ -n "$desc" ]] && parts+=("b $desc")
+      ;;
+  esac
+  desc=$(binding_desc_for_key "r" "Global")
+  [[ -n "$desc" ]] && parts+=("r $desc")
+  desc=$(binding_desc_for_key "s" "Global")
+  [[ -n "$desc" ]] && parts+=("s $desc")
+  desc=$(binding_desc_for_key "?" "Global")
+  [[ -n "$desc" ]] && parts+=("? $desc")
+
+  local IFS='  '
+  printf '%s' "${parts[*]}"
+}
+
 update_topbar_line() {
   local cols=$RENDER_COLS
   local id
   id=$(current_device_id)
-  local topbar_status="| $HINT_TEXT"
+  local topbar_status="| No device"
   if [[ -n "$id" ]]; then
     local conn="offline"
     if [[ "${DEV_ONLINE[$id]:-0}" == "1" ]]; then
       conn="online"
     fi
-    topbar_status="| $(device_display_name "$id") ($conn) | $HINT_TEXT"
+    topbar_status="| $(device_display_name "$id") ($conn)"
   fi
   FRAME_LINES[0]=$(ui_format_topbar "$cols" "$APP_NAME" "$topbar_status")
   mark_dirty_row 0
@@ -680,33 +830,7 @@ build_advanced_lines() {
 
 overlay_help() {
   local rows=$1 cols=$2
-  local lines=(
-    "Global"
-    "  q        Quit"
-    "  ?        Toggle help"
-    "  Tab      Next tab"
-    "  Shift-Tab Prev tab"
-    "  r        Refresh selected device"
-    "  s        Scan (Bonjour)"
-    ""
-    "Devices"
-    "  a        Add device"
-    "  d        Delete device"
-    "  e        Edit device"
-    "  [ ]      Prev/Next device"
-    ""
-    "Lists"
-    "  ↑ ↓      Move selection"
-    "  Enter    Apply/Toggle"
-    "  ← →      Adjust value"
-    ""
-    "Segments"
-    "  i        Toggle speed/intensity"
-    "  c        Toggle RGB channel"
-    "  g        Apply to all segments"
-    "  l        Toggle live mode"
-    "  b        Reboot selected device"
-  )
+  local lines=("${HELP_LINES[@]}")
   local max_len=0
   local line
   for line in "${lines[@]}"; do
@@ -781,7 +905,7 @@ build_frame() {
   if (( RIGHT_INNER_WIDTH < 1 )); then
     RIGHT_INNER_WIDTH=1
   fi
-  FRAME_INNER_ROWS=$((rows-2))
+  FRAME_INNER_ROWS=$((rows-3))
   if (( FRAME_INNER_ROWS < 0 )); then
     FRAME_INNER_ROWS=0
   fi
@@ -809,7 +933,7 @@ build_frame() {
   fi
 
   FRAME_LINES=()
-  local topbar_status=""
+  local topbar_status="| No device"
   local id
   id=$(current_device_id)
   if [[ -n "$id" ]]; then
@@ -817,9 +941,7 @@ build_frame() {
     if [[ "${DEV_ONLINE[$id]:-0}" == "1" ]]; then
       conn="online"
     fi
-    topbar_status="| $(device_display_name "$id") ($conn) | $HINT_TEXT"
-  else
-    topbar_status="| $HINT_TEXT"
+    topbar_status="| $(device_display_name "$id") ($conn)"
   fi
   FRAME_LINES[0]=$(ui_format_topbar "$cols" "$APP_NAME" "$topbar_status")
 
@@ -928,18 +1050,27 @@ build_frame() {
     esac
   fi
 
-  if (( rows > 1 )); then
+  if (( rows > 2 )); then
     FRAME_LINES[1]="$(box_top_line "$left_width" " Devices ")$(box_top_line "$right_width" " ${TAB_NAMES[$TAB_INDEX]} ")"
   fi
   for ((i=0; i<FRAME_INNER_ROWS; i++)); do
     FRAME_LINES[$((i+2))]="|${LEFT_LINES[$i]}||${RIGHT_LINES[$i]}|"
   done
-  if (( rows > 1 )); then
-    FRAME_LINES[$((rows-1))]="$(box_bottom_line "$left_width")$(box_bottom_line "$right_width")"
+  if (( rows > 2 )); then
+    FRAME_LINES[$((rows-2))]="$(box_bottom_line "$left_width")$(box_bottom_line "$right_width")"
   fi
 
   if (( SHOW_HELP )); then
+    if (( ${#HELP_LINES[@]} == 0 )); then
+      build_help_lines
+    fi
     overlay_help "$rows" "$cols"
+  fi
+
+  if (( rows > 0 )); then
+    local footer_hint
+    footer_hint=$(build_footer_hint)
+    FRAME_LINES[$((rows-1))]=$(ui_format_footer "$cols" "$footer_hint")
   fi
 }
 
@@ -963,7 +1094,7 @@ handle_key() {
       fi
       UI_DIRTY=1
       ;;
-    $'\e[Z')
+    $'\e[Z'|$'\e[1;2Z')
       TAB_INDEX=$(( (TAB_INDEX - 1 + ${#TAB_NAMES[@]}) % ${#TAB_NAMES[@]} ))
       UI_DIRTY=1
       ;;
