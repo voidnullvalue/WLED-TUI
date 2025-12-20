@@ -100,5 +100,3 @@ Use the same key labels as the footer legend:
 - Discovery relies on Avahi; without it, devices must be added manually.
 - Only the WLED JSON HTTP API is supported (`/json/state`, `/json/info`, `/json/effects`, `/json/palettes`, `/presets.json`/`/json/presets`).
 
-## License
-MIT
