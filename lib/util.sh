@@ -59,6 +59,39 @@ set_term_title() {
   printf '\033]0;%s\007' "$1"
 }
 
+with_lock() {
+  local lockfile=$1
+  shift
+  local lock_fd
+  exec {lock_fd}>"$lockfile"
+  flock -x "$lock_fd"
+  "$@"
+  local status=$?
+  flock -u "$lock_fd"
+  exec {lock_fd}>&-
+  return "$status"
+}
+
+parse_presets_tsv() {
+  jq -r '
+    if type == "object" then
+      to_entries
+      | map(select(.value != null))
+      | map({id:(.key|tonumber?), name:(.value.n // ("Preset " + .key))})
+      | map(select(.id != null))
+      | sort_by(.id)
+      | .[]
+      | "\(.id)\t\(.name)"
+    elif type == "array" then
+      to_entries
+      | map(select(.value != null))
+      | map({id:(.key|tonumber), name:(.value|tostring)})
+      | .[]
+      | "\(.id)\t\(.name)"
+    else empty end
+  '
+}
+
 read_key() {
   local key
   IFS= read -rsn1 -t 0.1 key || true
