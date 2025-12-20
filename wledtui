@@ -535,7 +535,8 @@ build_help_lines() {
         HELP_LINES+=("$scope")
         added=1
       fi
-      local display="$entry_key"
+      local display
+      display=$(format_key_label "$entry_key")
       if [[ -n "$entry_seq" && "$entry_seq" != "$entry_key" ]]; then
         display+=" ($entry_seq)"
       fi
@@ -550,6 +551,18 @@ build_help_lines() {
   if (( ${#HELP_LINES[@]} > 0 )) && [[ "${HELP_LINES[-1]}" == "" ]]; then
     unset 'HELP_LINES[-1]'
   fi
+}
+
+format_key_label() {
+  local key=$1
+  case "$key" in
+    Tab) key="tab" ;;
+    Shift-Tab) key="shift+tab" ;;
+    Enter) key="enter" ;;
+    Esc|ESC) key="esc" ;;
+  esac
+  key=${key//" / "/"/"}
+  printf '(%s)' "$key"
 }
 
 current_tab_scope() {
@@ -570,45 +583,45 @@ build_footer_hint() {
 
   local desc
   desc=$(binding_desc_for_key "q" "Global")
-  [[ -n "$desc" ]] && parts+=("q $desc")
+  [[ -n "$desc" ]] && parts+=("$(format_key_label "q") $desc")
   desc=$(binding_desc_for_key "Tab" "Global")
-  [[ -n "$desc" ]] && parts+=("Tab $desc")
+  [[ -n "$desc" ]] && parts+=("$(format_key_label "Tab") $desc")
   desc=$(binding_desc_for_key "Shift-Tab" "Global")
-  [[ -n "$desc" ]] && parts+=("Shift-Tab $desc")
+  [[ -n "$desc" ]] && parts+=("$(format_key_label "Shift-Tab") $desc")
   desc=$(binding_desc_for_key "↑ / ↓" "Lists")
-  [[ -n "$desc" ]] && parts+=("↑↓ $desc")
+  [[ -n "$desc" ]] && parts+=("$(format_key_label "↑ / ↓") $desc")
   desc=$(binding_desc_for_key "Enter" "$tab_scope")
-  [[ -n "$desc" ]] && parts+=("Enter $desc")
+  [[ -n "$desc" ]] && parts+=("$(format_key_label "Enter") $desc")
   case "$TAB_INDEX" in
     0|2|4|5)
       desc=$(binding_desc_for_key "← / →" "$tab_scope")
-      [[ -n "$desc" ]] && parts+=("←→ $desc")
+      [[ -n "$desc" ]] && parts+=("$(format_key_label "← / →") $desc")
       ;;
   esac
   case "$TAB_INDEX" in
     2)
       desc=$(binding_desc_for_key "i" "Effects tab")
-      [[ -n "$desc" ]] && parts+=("i $desc")
+      [[ -n "$desc" ]] && parts+=("$(format_key_label "i") $desc")
       ;;
     4)
       desc=$(binding_desc_for_key "c" "Segments tab")
-      [[ -n "$desc" ]] && parts+=("c $desc")
+      [[ -n "$desc" ]] && parts+=("$(format_key_label "c") $desc")
       desc=$(binding_desc_for_key "g" "Segments tab")
-      [[ -n "$desc" ]] && parts+=("g $desc")
+      [[ -n "$desc" ]] && parts+=("$(format_key_label "g") $desc")
       ;;
     5)
       desc=$(binding_desc_for_key "l" "Global")
-      [[ -n "$desc" ]] && parts+=("l $desc")
+      [[ -n "$desc" ]] && parts+=("$(format_key_label "l") $desc")
       desc=$(binding_desc_for_key "b" "Global")
-      [[ -n "$desc" ]] && parts+=("b $desc")
+      [[ -n "$desc" ]] && parts+=("$(format_key_label "b") $desc")
       ;;
   esac
   desc=$(binding_desc_for_key "r" "Global")
-  [[ -n "$desc" ]] && parts+=("r $desc")
+  [[ -n "$desc" ]] && parts+=("$(format_key_label "r") $desc")
   desc=$(binding_desc_for_key "s" "Global")
-  [[ -n "$desc" ]] && parts+=("s $desc")
+  [[ -n "$desc" ]] && parts+=("$(format_key_label "s") $desc")
   desc=$(binding_desc_for_key "?" "Global")
-  [[ -n "$desc" ]] && parts+=("? $desc")
+  [[ -n "$desc" ]] && parts+=("$(format_key_label "?") $desc")
 
   local IFS='  '
   printf '%s' "${parts[*]}"
