@@ -17,15 +17,34 @@ api_request() {
   local method=$1 id=$2 path=$3 payload=${4:-}
   local url
   url="$(api_base_url "$id")$path"
+  local response exit_code
   if [[ "$method" == "GET" ]]; then
-    curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
-      --silent --show-error --fail "$url" 2>/dev/null || return 1
+    if response=$(curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
+      --silent --show-error --fail "$url" 2>&1); then
+      exit_code=0
+    else
+      exit_code=$?
+    fi
   else
-    curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
+    if response=$(curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
       --silent --show-error --fail \
       -H 'Content-Type: application/json' -X "$method" \
-      --data-binary "$payload" "$url" 2>/dev/null || return 1
+      --data-binary "$payload" "$url" 2>&1); then
+      exit_code=0
+    else
+      exit_code=$?
+    fi
   fi
+  local device_label="$id"
+  if declare -F device_display_name >/dev/null 2>&1; then
+    device_label=$(device_display_name "$id")
+  fi
+  local snippet=${response:0:200}
+  log_debug "device=${device_label} url=${url} payload=${payload} exit=${exit_code} response=${snippet}"
+  if (( exit_code != 0 )); then
+    return 1
+  fi
+  printf '%s' "$response"
 }
 
 api_get_info() {
