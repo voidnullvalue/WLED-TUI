@@ -4,11 +4,14 @@ shopt -s lastpipe
 IFS=$'\n\t'
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wledtui"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/wledtui"
 CACHE_FILE="$CONFIG_DIR/devices.json"
+DEBUG_LOG_FILE="$CACHE_DIR/debug.log"
 
 log_debug() {
-  if [[ -n "${WLEDTUI_DEBUG:-}" ]]; then
-    printf '[debug] %s\n' "$*" >&2
+  if [[ "${WLEDTUI_DEBUG:-}" == "1" ]]; then
+    ensure_cache_dir
+    printf '%s %s\n' "$(date -Iseconds)" "$*" >> "$DEBUG_LOG_FILE"
   fi
 }
 
@@ -20,6 +23,9 @@ ensure_config_dir() {
   mkdir -p "$CONFIG_DIR"
 }
 
+ensure_cache_dir() {
+  mkdir -p "$CACHE_DIR"
+}
 clamp() {
   local value=$1 min=$2 max=$3
   if (( value < min )); then
@@ -94,9 +100,13 @@ parse_presets_tsv() {
 
 read_key() {
   local key
-  IFS= read -rsn1 -t 0.1 key || true
-  if [[ -z "$key" ]]; then
-    printf ''
+  if IFS= read -rsn1 -t 0.1 key; then
+    local status=0
+  else
+    local status=$?
+  fi
+  if (( status != 0 )); then
+    printf '__NONE__'
     return
   fi
   if [[ "$key" == $'\e' ]]; then
