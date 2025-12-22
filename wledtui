@@ -23,6 +23,16 @@ MODEL_DIRTY=0
 RESIZED=0
 DISCOVER_INFLIGHT_PID=""
 DISCOVER_REQUESTED=0
+UI_BUSY_SCAN=0
+UI_BUSY_REFRESH=0
+UI_BUSY_REFRESH_ID=""
+UI_BUSY_REFRESH_ERROR=0
+UI_MODAL_MESSAGE=""
+UI_MODAL_ERROR_UNTIL=0
+UI_SPINNER_FRAMES=("|" "/" "-" "\\")
+UI_SPINNER_INDEX=0
+UI_SPINNER_LAST_MS=0
+UI_SPINNER_INTERVAL_MS=120
 
 PRESETS_IDS=()
 PRESETS_NAMES=()
@@ -637,9 +647,11 @@ process_get_result() {
   status_line=$(cat "$status_file" 2>/dev/null || true)
   rm -f "$status_file"
   exit_code=$(awk '{print $1}' <<<"$status_line")
+  local request_failed=0
   case "$type" in
     state)
       if [[ "$exit_code" != "0" || ! -f "$data_file" ]]; then
+        request_failed=1
         apply_state_failure "$id"
       else
         local state
@@ -650,6 +662,7 @@ process_get_result() {
             LAST_REFRESH_SELECTED=$(now_ts)
           fi
         else
+          request_failed=1
           apply_state_failure "$id"
         fi
       fi
@@ -658,7 +671,13 @@ process_get_result() {
       if [[ "$exit_code" == "0" && -f "$data_file" ]]; then
         local info
         info=$(cat "$data_file" 2>/dev/null || true)
-        [[ -n "$info" ]] && apply_info_response "$id" "$info"
+        if [[ -n "$info" ]] && jq -e '.' <<<"$info" >/dev/null 2>&1; then
+          apply_info_response "$id" "$info"
+        else
+          request_failed=1
+        fi
+      else
+        request_failed=1
       fi
       ;;
     presets)
@@ -689,6 +708,9 @@ process_get_result() {
       fi
       ;;
   esac
+  if (( request_failed && UI_BUSY_REFRESH )) && [[ "$id" == "$UI_BUSY_REFRESH_ID" ]] && [[ "$type" == "state" || "$type" == "info" ]]; then
+    UI_BUSY_REFRESH_ERROR=1
+  fi
   local pid
   case "$type" in
     state) pid=${DEV_GET_STATE_INFLIGHT_PID[$id]:-} ;;
@@ -788,6 +810,15 @@ process_discover_results() {
     DEVICE_LIST_DIRTY=1
     UI_DIRTY=1
     model_save_devices
+    if (( UI_BUSY_SCAN )); then
+      UI_BUSY_SCAN=0
+      UI_DIRTY=1
+    fi
+  else
+    if (( UI_BUSY_SCAN )); then
+      UI_BUSY_SCAN=0
+      set_modal_error "Scan failed."
+    fi
   fi
   if [[ -n "$DISCOVER_INFLIGHT_PID" ]]; then
     if ! kill -0 "$DISCOVER_INFLIGHT_PID" 2>/dev/null; then
@@ -1326,6 +1357,98 @@ build_advanced_lines() {
   set_right_line 3 "$width" "Reboot: press b"
 }
 
+spinner_frame() {
+  printf '%s' "${UI_SPINNER_FRAMES[$UI_SPINNER_INDEX]}"
+}
+
+current_modal_message() {
+  local now
+  now=$(now_ms)
+  if (( UI_MODAL_ERROR_UNTIL > now )); then
+    printf '%s' "$UI_MODAL_MESSAGE"
+    return
+  fi
+  if (( UI_BUSY_SCAN )); then
+    printf 'Scanning for devices... %s' "$(spinner_frame)"
+    return
+  fi
+  if (( UI_BUSY_REFRESH )); then
+    printf 'Refreshing device state... %s' "$(spinner_frame)"
+    return
+  fi
+  printf ''
+}
+
+set_modal_error() {
+  local message=$1
+  UI_MODAL_MESSAGE="$message"
+  UI_MODAL_ERROR_UNTIL=$(( $(now_ms) + 1500 ))
+  UI_DIRTY=1
+}
+
+begin_busy_scan() {
+  UI_BUSY_SCAN=1
+  UI_MODAL_ERROR_UNTIL=0
+  UI_MODAL_MESSAGE=""
+  UI_SPINNER_INDEX=0
+  UI_SPINNER_LAST_MS=$(now_ms)
+  start_discover_scan
+  UI_DIRTY=1
+}
+
+begin_busy_refresh() {
+  local id=$1
+  [[ -z "$id" ]] && return
+  UI_BUSY_REFRESH=1
+  UI_BUSY_REFRESH_ID="$id"
+  UI_BUSY_REFRESH_ERROR=0
+  UI_MODAL_ERROR_UNTIL=0
+  UI_MODAL_MESSAGE=""
+  UI_SPINNER_INDEX=0
+  UI_SPINNER_LAST_MS=$(now_ms)
+  schedule_state_fetch "$id"
+  schedule_info_fetch "$id"
+  UI_DIRTY=1
+}
+
+update_busy_states() {
+  local now
+  now=$(now_ms)
+  if (( UI_MODAL_ERROR_UNTIL > 0 && now >= UI_MODAL_ERROR_UNTIL )); then
+    UI_MODAL_ERROR_UNTIL=0
+    UI_MODAL_MESSAGE=""
+    UI_DIRTY=1
+  fi
+  if (( UI_BUSY_REFRESH )); then
+    local id=$UI_BUSY_REFRESH_ID
+    local state_pid=${DEV_GET_STATE_INFLIGHT_PID[$id]:-}
+    local info_pid=${DEV_GET_INFO_INFLIGHT_PID[$id]:-}
+    if [[ -z "$state_pid" && -z "$info_pid" ]]; then
+      UI_BUSY_REFRESH=0
+      UI_BUSY_REFRESH_ID=""
+      if (( UI_BUSY_REFRESH_ERROR )); then
+        UI_BUSY_REFRESH_ERROR=0
+        set_modal_error "Refresh failed."
+      else
+        UI_DIRTY=1
+      fi
+    fi
+  fi
+}
+
+update_spinner() {
+  if (( ! UI_BUSY_SCAN && ! UI_BUSY_REFRESH )); then
+    return
+  fi
+  local now
+  now=$(now_ms)
+  if (( now - UI_SPINNER_LAST_MS >= UI_SPINNER_INTERVAL_MS )); then
+    UI_SPINNER_LAST_MS=$now
+    UI_SPINNER_INDEX=$(( (UI_SPINNER_INDEX + 1) % ${#UI_SPINNER_FRAMES[@]} ))
+    UI_DIRTY=1
+  fi
+}
+
 overlay_help() {
   local rows=$1 cols=$2
   local lines=("${HELP_LINES[@]}")
@@ -1375,6 +1498,48 @@ overlay_help() {
     suffix=$(printf '%*s' "$((cols-col-width))")
     FRAME_LINES[$((row+i))]="${prefix}${overlay_line}${suffix}"
   done
+}
+
+overlay_modal() {
+  local rows=$1 cols=$2 message=$3
+  if [[ -z "$message" ]]; then
+    return
+  fi
+  local max_width=$((cols-4))
+  if (( max_width < 10 || rows < 3 )); then
+    return
+  fi
+  local width=$(( ${#message} + 4 ))
+  if (( width < 24 )); then
+    width=24
+  fi
+  if (( width > max_width )); then
+    width=$max_width
+  fi
+  local height=3
+  if (( rows < height )); then
+    return
+  fi
+  local row=$(( (rows - height) / 2 ))
+  if (( row < 0 )); then
+    row=0
+  fi
+  local col=$(( (cols - width) / 2 ))
+  if (( col < 0 )); then
+    col=0
+  fi
+  local inner=$((width-2))
+  local content
+  content=$(ui_pad_text " $message " "$inner")
+  local prefix suffix overlay_line
+  prefix=$(printf '%*s' "$col")
+  suffix=$(printf '%*s' "$((cols-col-width))")
+  overlay_line=$(box_top_line "$width" " Status ")
+  FRAME_LINES[$row]="${prefix}${overlay_line}${suffix}"
+  overlay_line="|${content}|"
+  FRAME_LINES[$((row+1))]="${prefix}${overlay_line}${suffix}"
+  overlay_line=$(box_bottom_line "$width")
+  FRAME_LINES[$((row+2))]="${prefix}${overlay_line}${suffix}"
 }
 
 build_frame() {
@@ -1570,6 +1735,12 @@ build_frame() {
     overlay_help "$rows" "$cols"
   fi
 
+  local modal_message
+  modal_message=$(current_modal_message)
+  if [[ -n "$modal_message" ]]; then
+    overlay_modal "$rows" "$cols" "$modal_message"
+  fi
+
   if (( rows > 0 )); then
     local footer_hint
     footer_hint=$(build_footer_hint)
@@ -1621,10 +1792,8 @@ handle_key() {
       ;;
     r)
       if [[ -n "$id" ]]; then
-        schedule_state_fetch "$id"
-        schedule_info_fetch "$id"
+        begin_busy_refresh "$id"
       fi
-      UI_DIRTY=1
       ;;
     a)
       handle_add_device
@@ -1639,8 +1808,7 @@ handle_key() {
       UI_DIRTY=1
       ;;
     s)
-      start_discover_scan
-      UI_DIRTY=1
+      begin_busy_scan
       ;;
     '?')
       SHOW_HELP=$((1-SHOW_HELP))
@@ -2295,6 +2463,8 @@ main_loop() {
   while true; do
     process_network_queue
     process_discover_results
+    update_busy_states
+    update_spinner
     if (( RESIZED )); then
       render_set_size
       RESIZED=0
