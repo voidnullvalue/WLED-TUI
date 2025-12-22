@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Async model: all HTTP curls run in background jobs and write results/status into
+# shared cache files under $CACHE_DIR/net; the main loop only polls those files,
+# applying optimistic UI updates without waiting on network responses.
 set -euo pipefail
 shopt -s lastpipe
 IFS=$'\n\t'
@@ -241,6 +244,10 @@ ensure_net_spool_dir() {
   mkdir -p "$CACHE_DIR/net"
 }
 
+net_events_path() {
+  printf '%s/net/events.queue' "$CACHE_DIR"
+}
+
 net_data_path() {
   local id=$1 type=$2
   local key
@@ -262,6 +269,8 @@ start_get_request() {
   url="$(api_base_url "$id")$path"
   outfile=$(net_data_path "$id" "$type")
   statusfile=$(net_status_path "$id" "$type")
+  local events_file
+  events_file=$(net_events_path)
   tmp="${outfile}.tmp.$$"
   delay_ms=${WLEDTUI_NET_DELAY_MS:-0}
   (
@@ -275,6 +284,7 @@ start_get_request() {
       rm -f "$tmp"
     fi
     printf '%s %s\n' "$exit_code" "$(now_ts)" > "$statusfile"
+    printf '%s\t%s\n' "$id" "$type" >> "$events_file"
   ) &
   printf '%s' "$!"
 }
@@ -688,14 +698,21 @@ process_get_result() {
 
 process_network_queue() {
   process_patch_queue
-  local id
-  for id in "${DEVICE_IDS[@]}"; do
-    process_get_result "$id" "state"
-    process_get_result "$id" "info"
-    process_get_result "$id" "presets"
-    process_get_result "$id" "effects"
-    process_get_result "$id" "palettes"
-  done
+  local events_file
+  events_file=$(net_events_path)
+  if [[ ! -f "$events_file" ]]; then
+    return
+  fi
+  local tmp="${events_file}.$$"
+  if ! mv "$events_file" "$tmp" 2>/dev/null; then
+    return
+  fi
+  local line id type
+  while IFS=$'\t' read -r id type; do
+    [[ -z "$id" || -z "$type" ]] && continue
+    process_get_result "$id" "$type"
+  done < "$tmp"
+  rm -f "$tmp"
 }
 
 start_discover_scan() {
