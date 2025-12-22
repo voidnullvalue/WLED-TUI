@@ -22,6 +22,7 @@ UI_DIRTY=1
 MODEL_DIRTY=0
 RESIZED=0
 DISCOVER_INFLIGHT_PID=""
+DISCOVER_REQUESTED=0
 
 PRESETS_IDS=()
 PRESETS_NAMES=()
@@ -54,7 +55,7 @@ KEYBINDINGS=(
   "Global|Tab|Tab|Next tab"
   "Global|Shift-Tab|ESC[Z/ESC[1;2Z]|Previous tab"
   "Global|r|r|Refresh selected device"
-  "Global|s|s|Scan for devices"
+  "Global|s|s|Scan devices"
   "Global|l|l|Toggle live mode"
   "Global|b|b|Reboot device"
   "Devices|a|a|Add device"
@@ -735,6 +736,7 @@ start_discover_scan() {
       return
     fi
   fi
+  DISCOVER_REQUESTED=1
   ensure_net_spool_dir
   local outfile statusfile tmp delay_ms
   outfile="$CACHE_DIR/net/discover.results"
@@ -759,6 +761,9 @@ process_discover_results() {
   local statusfile outfile
   statusfile="$CACHE_DIR/net/discover.status"
   outfile="$CACHE_DIR/net/discover.results"
+  if (( ! DISCOVER_REQUESTED )); then
+    return
+  fi
   if [[ ! -f "$statusfile" ]]; then
     return
   fi
@@ -769,14 +774,16 @@ process_discover_results() {
   if [[ "$exit_code" == "0" && -f "$outfile" ]]; then
     local now
     now=$(now_ts)
-    local entry name host port
+    local entry name host addr port
     while IFS= read -r entry; do
       [[ -z "$entry" ]] && continue
-      IFS='|' read -r name host port <<<"$entry"
-      model_add_device "$name" "$host" "$port"
+      IFS='|' read -r name host addr port <<<"$entry"
+      model_add_device "$name" "$host" "$port" "$addr"
       local id
       id=$(device_id "$host" "$port")
       DEV_LAST_SEEN[$id]="$now"
+      schedule_state_fetch "$id"
+      schedule_info_fetch "$id"
     done < "$outfile"
     DEVICE_LIST_DIRTY=1
     UI_DIRTY=1
@@ -788,6 +795,7 @@ process_discover_results() {
       DISCOVER_INFLIGHT_PID=""
     fi
   fi
+  DISCOVER_REQUESTED=0
 }
 
 apply_state_payload() {
@@ -874,7 +882,7 @@ update_segment_texts() {
 rebuild_device_cache() {
   LEFT_ROW_NORMAL=()
   LEFT_ROW_SELECTED=()
-  local i id name status bri preset on marker line stale_label
+  local i id name status bri preset on marker line stale_label offline_label
   for i in "${!DEVICE_IDS[@]}"; do
     id=${DEVICE_IDS[$i]}
     name=$(device_display_name "$id")
@@ -892,7 +900,11 @@ rebuild_device_cache() {
     if [[ "${DEV_STATE_STALE[$id]:-0}" == "1" ]]; then
       stale_label=" stale"
     fi
-    line="${name:0:16} ${marker} bri:${bri}${pending} ps:${preset}${stale_label}"
+    offline_label=""
+    if [[ "$status" != "1" ]]; then
+      offline_label=" offline"
+    fi
+    line="${name:0:16} ${marker} bri:${bri}${pending} ps:${preset}${offline_label}${stale_label}"
     LEFT_ROW_NORMAL[$i]=$(ui_format_list_item "$line" "$LEFT_INNER_WIDTH" 0 $(( status == 0 )))
     LEFT_ROW_SELECTED[$i]=$(ui_format_list_item "$line" "$LEFT_INNER_WIDTH" 1 0)
   done
@@ -2281,24 +2293,8 @@ main_loop() {
   trap 'RESIZED=1' WINCH
 
   while true; do
-    local now
-    now=$(now_ts)
     process_network_queue
     process_discover_results
-    local id
-    for id in "${DEVICE_IDS[@]}"; do
-      local next=${DEV_NEXT_POLL[$id]:-0}
-      if (( now >= next )); then
-        schedule_state_fetch "$id"
-      fi
-      if [[ "${DEV_ONLINE[$id]:-0}" == "1" ]]; then
-        local last_info=${DEV_INFO_TS[$id]:-0}
-        local wled_name=${DEV_WLED_NAME[$id]:-}
-        if [[ -z "$wled_name" || $(( now - last_info )) -ge $INFO_REFRESH_TTL ]]; then
-          schedule_info_fetch "$id"
-        fi
-      fi
-    done
     if (( RESIZED )); then
       render_set_size
       RESIZED=0

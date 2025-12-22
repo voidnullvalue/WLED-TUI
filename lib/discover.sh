@@ -64,7 +64,7 @@ discover_devices_report() {
     else
       use_host="$addr"
     fi
-    printf '%s|%s|%s\n' "$name" "$use_host" "$port"
+    printf '%s|%s|%s|%s\n' "$name" "$use_host" "$addr" "$port"
   done
 }
 
