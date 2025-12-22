@@ -35,9 +35,7 @@ discover_secondary() {
   discover_parse_avahi '_http._tcp'
 }
 
-discover_devices() {
-  local now
-  now=$(now_ts)
+discover_devices_report() {
   local found=()
   local entry name host addr port info
 
@@ -66,9 +64,20 @@ discover_devices() {
     else
       use_host="$addr"
     fi
-    model_add_device "$name" "$use_host" "$port"
-    local id
-    id=$(device_id "$use_host" "$port")
-    DEV_LAST_SEEN[$id]="$now"
+    printf '%s|%s|%s\n' "$name" "$use_host" "$port"
   done
+}
+
+discover_devices() {
+  local now
+  now=$(now_ts)
+  local entry name host port
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    IFS='|' read -r name host port <<<"$entry"
+    model_add_device "$name" "$host" "$port"
+    local id
+    id=$(device_id "$host" "$port")
+    DEV_LAST_SEEN[$id]="$now"
+  done < <(discover_devices_report)
 }

@@ -18,6 +18,7 @@ SHOW_HELP=0
 UI_DIRTY=1
 MODEL_DIRTY=0
 RESIZED=0
+DISCOVER_INFLIGHT_PID=""
 
 PRESETS_IDS=()
 PRESETS_NAMES=()
@@ -36,13 +37,11 @@ PRESETS_LOCK="$CONFIG_DIR/presets.lock"
 MODEL_BUSY=0
 INFO_REFRESH_TTL=300
 BRI_STEP=5
-BRI_DEBOUNCE_MS=${WLEDTUI_BRI_DEBOUNCE_MS:-40}
-BRI_MIN_SEND_INTERVAL_MS=${WLEDTUI_BRI_MIN_SEND_INTERVAL_MS:-40}
-BRI_ACTIVE_WINDOW_MS=${WLEDTUI_BRI_ACTIVE_WINDOW_MS:-300}
+PATCH_DEBOUNCE_MS=${WLEDTUI_PATCH_DEBOUNCE_MS:-50}
+PATCH_MIN_SEND_INTERVAL_MS=${WLEDTUI_PATCH_MIN_SEND_INTERVAL_MS:-50}
+UI_ACTIVE_WINDOW_MS=${WLEDTUI_ACTIVE_WINDOW_MS:-400}
 
 LAST_REFRESH_SELECTED=0
-LAST_POLL_SELECTED=0
-LAST_POLL_ALL=0
 FRAME_INNER_ROWS=0
 LEFT_INNER_WIDTH=0
 RIGHT_INNER_WIDTH=0
@@ -167,14 +166,14 @@ fetch_presets() {
   local id=$1
   ensure_config_dir
   with_lock "$PRESETS_LOCK" fetch_presets_locked "$id"
+  schedule_presets_fetch "$id"
 }
 
 fetch_presets_locked() {
   local id=$1
   PRESETS_IDS=()
   PRESETS_NAMES=()
-  local data
-  data=$(api_get_presets "$id" || true)
+  local data="${DEV_PRESETS_JSON[$id]:-}"
   if [[ -z "$data" ]]; then
     PRESET_INDEX=0
     SELECTED_PRESET_ID=""
@@ -182,7 +181,7 @@ fetch_presets_locked() {
   fi
   local desired_id="${SELECTED_PRESET_ID:-}"
   if [[ -z "$desired_id" || "$desired_id" == "0" ]]; then
-    desired_id="${DEV_PRESET[$id]:-0}"
+    desired_id="${DEV_DESIRED_PRESET[$id]:-${DEV_PRESET[$id]:-0}}"
   fi
   SELECTED_PRESET_ID="$desired_id"
   local lines=()
@@ -200,9 +199,20 @@ fetch_presets_locked() {
 
 fetch_effects() {
   local id=$1
+  load_effects_from_cache "$id"
+  schedule_effects_fetch "$id"
+}
+
+fetch_palettes() {
+  local id=$1
+  load_palettes_from_cache "$id"
+  schedule_palettes_fetch "$id"
+}
+
+load_effects_from_cache() {
+  local id=$1
   EFFECTS=()
-  local data
-  data=$(api_get_effects "$id" || true)
+  local data="${DEV_EFFECTS_JSON[$id]:-}"
   if [[ -z "$data" ]]; then
     return
   fi
@@ -210,11 +220,10 @@ fetch_effects() {
   EFFECTS_CACHE_DIRTY=1
 }
 
-fetch_palettes() {
+load_palettes_from_cache() {
   local id=$1
   PALETTES=()
-  local data
-  data=$(api_get_palettes "$id" || true)
+  local data="${DEV_PALETTES_JSON[$id]:-}"
   if [[ -z "$data" ]]; then
     return
   fi
@@ -222,27 +231,199 @@ fetch_palettes() {
   PALETTES_CACHE_DIRTY=1
 }
 
-update_device_state() {
+net_key() {
   local id=$1
-  local state
-  state=$(api_get_state "$id" || true)
-  local changed=0
-  if [[ -z "$state" ]]; then
-    if [[ "${DEV_ONLINE[$id]:-0}" != "0" ]]; then
-      DEV_ONLINE[$id]="0"
-      DEVICE_LIST_DIRTY=1
-      changed=1
+  printf '%s' "${id//:/_}"
+}
+
+ensure_net_spool_dir() {
+  ensure_cache_dir
+  mkdir -p "$CACHE_DIR/net"
+}
+
+net_data_path() {
+  local id=$1 type=$2
+  local key
+  key=$(net_key "$id")
+  printf '%s/net/%s.%s.json' "$CACHE_DIR" "$key" "$type"
+}
+
+net_status_path() {
+  local id=$1 type=$2
+  local key
+  key=$(net_key "$id")
+  printf '%s/net/%s.%s.status' "$CACHE_DIR" "$key" "$type"
+}
+
+start_get_request() {
+  local id=$1 type=$2 path=$3
+  ensure_net_spool_dir
+  local url outfile statusfile tmp delay_ms
+  url="$(api_base_url "$id")$path"
+  outfile=$(net_data_path "$id" "$type")
+  statusfile=$(net_status_path "$id" "$type")
+  tmp="${outfile}.tmp.$$"
+  delay_ms=${WLEDTUI_NET_DELAY_MS:-0}
+  (
+    sleep_ms "$delay_ms"
+    local exit_code=0
+    if curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
+      --silent --show-error --fail "$url" -o "$tmp" 2>/dev/null; then
+      mv "$tmp" "$outfile"
+    else
+      exit_code=$?
+      rm -f "$tmp"
     fi
-    local backoff=${DEV_BACKOFF[$id]:-2}
-    backoff=$(clamp "$backoff" 2 30)
-    DEV_NEXT_POLL[$id]="$(( $(now_ts) + backoff ))"
-    DEV_BACKOFF[$id]="$(( backoff * 2 ))"
-    if (( changed )); then
-      MODEL_DIRTY=1
-      return 0
-    fi
-    return 1
+    printf '%s %s\n' "$exit_code" "$(now_ts)" > "$statusfile"
+  ) &
+  printf '%s' "$!"
+}
+
+start_patch_send() {
+  local id=$1 payload=$2
+  ensure_net_spool_dir
+  local url delay_ms
+  url="$(api_base_url "$id")/json/state"
+  delay_ms=${WLEDTUI_NET_DELAY_MS:-0}
+  if [[ "${WLEDTUI_ASYNC_DRY_RUN:-}" == "1" ]]; then
+    (
+      sleep_ms "$delay_ms"
+    ) &
+  else
+    (
+      sleep_ms "$delay_ms"
+      curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
+        --silent --show-error --fail \
+        -H 'Content-Type: application/json' -X POST \
+        --data-binary "$payload" "$url" >/dev/null 2>&1
+    ) &
   fi
+  printf '%s' "$!"
+}
+
+device_display_brightness() {
+  local id=$1
+  local bri=${DEV_UI_BRI[$id]:-}
+  if [[ -z "$bri" ]]; then
+    bri=${DEV_BRI[$id]:-0}
+  fi
+  printf '%s' "$bri"
+}
+
+device_display_on() {
+  local id=$1
+  local on=${DEV_DESIRED_ON[$id]:-}
+  if [[ -z "$on" ]]; then
+    on=${DEV_ON[$id]:-false}
+  fi
+  printf '%s' "$on"
+}
+
+device_display_preset() {
+  local id=$1
+  local preset=${DEV_DESIRED_PRESET[$id]:-}
+  if [[ -z "$preset" ]]; then
+    preset=${DEV_PRESET[$id]:-0}
+  fi
+  printf '%s' "$preset"
+}
+
+device_display_transition() {
+  local id=$1
+  local transition=${DEV_DESIRED_TRANSITION[$id]:-}
+  if [[ -z "$transition" ]]; then
+    transition=${DEV_TRANSITION[$id]:-0}
+  fi
+  printf '%s' "$transition"
+}
+
+device_display_nl_on() {
+  local id=$1
+  local nl_on=${DEV_DESIRED_NL_ON[$id]:-}
+  if [[ -z "$nl_on" ]]; then
+    nl_on=${DEV_NL_ON[$id]:-false}
+  fi
+  printf '%s' "$nl_on"
+}
+
+device_display_live() {
+  local id=$1
+  local live=${DEV_DESIRED_LIVE[$id]:-}
+  if [[ -z "$live" ]]; then
+    live=${DEV_LIVE[$id]:-false}
+  fi
+  printf '%s' "$live"
+}
+
+brightness_pending_marker() {
+  local id=$1
+  local ui=${DEV_UI_BRI[$id]:-}
+  local dev=${DEV_BRI[$id]:-0}
+  if [[ -n "$ui" && "$ui" != "$dev" ]]; then
+    printf '*'
+  fi
+}
+
+desired_state_pending() {
+  local id=$1
+  local desired_on=${DEV_DESIRED_ON[$id]:-}
+  local desired_bri=${DEV_DESIRED_BRI[$id]:-}
+  local desired_preset=${DEV_DESIRED_PRESET[$id]:-}
+  local desired_transition=${DEV_DESIRED_TRANSITION[$id]:-}
+  local desired_nl=${DEV_DESIRED_NL_ON[$id]:-}
+  local desired_live=${DEV_DESIRED_LIVE[$id]:-}
+  if [[ -n "$desired_on" && "$desired_on" != "${DEV_ON[$id]:-false}" ]]; then
+    return 0
+  fi
+  if [[ -n "$desired_bri" && "$desired_bri" != "${DEV_BRI[$id]:-0}" ]]; then
+    return 0
+  fi
+  if [[ -n "$desired_preset" && "$desired_preset" != "${DEV_PRESET[$id]:-0}" ]]; then
+    return 0
+  fi
+  if [[ -n "$desired_transition" && "$desired_transition" != "${DEV_TRANSITION[$id]:-0}" ]]; then
+    return 0
+  fi
+  if [[ -n "$desired_nl" && "$desired_nl" != "${DEV_NL_ON[$id]:-false}" ]]; then
+    return 0
+  fi
+  if [[ -n "$desired_live" && "$desired_live" != "${DEV_LIVE[$id]:-false}" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+sync_desired_from_known() {
+  local id=$1
+  local now_ms
+  now_ms=$(now_ms)
+  if [[ -n "${DEV_PENDING_PATCH[$id]:-}" || -n "${DEV_PATCH_INFLIGHT_PID[$id]:-}" ]]; then
+    return
+  fi
+  local last=${DEV_LAST_USER_ACTION_MS[$id]:-0}
+  if desired_state_pending "$id"; then
+    if [[ "${DEV_ONLINE[$id]:-0}" != "1" ]]; then
+      return
+    fi
+    if (( now_ms - last <= UI_ACTIVE_WINDOW_MS )); then
+      return
+    fi
+  elif (( now_ms - last <= UI_ACTIVE_WINDOW_MS )); then
+    return
+  fi
+  DEV_UI_BRI[$id]="${DEV_BRI[$id]:-0}"
+  DEV_DESIRED_BRI[$id]="${DEV_BRI[$id]:-0}"
+  DEV_DESIRED_ON[$id]="${DEV_ON[$id]:-false}"
+  DEV_DESIRED_PRESET[$id]="${DEV_PRESET[$id]:-0}"
+  DEV_DESIRED_TRANSITION[$id]="${DEV_TRANSITION[$id]:-0}"
+  DEV_DESIRED_NL_ON[$id]="${DEV_NL_ON[$id]:-false}"
+  DEV_DESIRED_LIVE[$id]="${DEV_LIVE[$id]:-false}"
+  DEVICE_LIST_DIRTY=1
+}
+
+apply_state_response() {
+  local id=$1 state=$2
+  local changed=0
   if [[ "${DEV_ONLINE[$id]:-0}" != "1" ]]; then
     DEV_ONLINE[$id]="1"
     DEVICE_LIST_DIRTY=1
@@ -262,32 +443,47 @@ update_device_state() {
     DEV_NL_DUR[$id]=$(jq -r '.nl.dur // 0' <<<"$normalized")
     DEV_LIVE[$id]=$(jq -r '.live // false' <<<"$normalized")
     DEVICE_LIST_DIRTY=1
+    sync_desired_from_known "$id"
     if [[ "$id" == "$(current_device_id)" ]]; then
-      SEGMENTS=()
-      mapfile -t SEGMENTS < <(jq -c '.seg[]?' <<<"$normalized")
-      update_segment_texts
+      local now_ms
+      now_ms=$(now_ms)
+      local last=${DEV_LAST_USER_ACTION_MS[$id]:-0}
+      if (( now_ms - last > UI_ACTIVE_WINDOW_MS )); then
+        SEGMENTS=()
+        mapfile -t SEGMENTS < <(jq -c '.seg[]?' <<<"$normalized")
+        update_segment_texts
+      fi
     fi
-    sync_ui_brightness_from_device "$id"
     changed=1
   fi
   if (( changed )); then
     MODEL_DIRTY=1
-    return 0
   fi
-  return 1
 }
 
-update_device_info() {
+apply_state_failure() {
   local id=$1
-  local info
-  info=$(api_get_info "$id" || true)
-  if [[ -z "$info" ]]; then
-    return 1
+  local changed=0
+  if [[ "${DEV_ONLINE[$id]:-0}" != "0" ]]; then
+    DEV_ONLINE[$id]="0"
+    DEVICE_LIST_DIRTY=1
+    changed=1
   fi
+  local backoff=${DEV_BACKOFF[$id]:-2}
+  backoff=$(clamp "$backoff" 2 30)
+  DEV_NEXT_POLL[$id]="$(( $(now_ts) + backoff ))"
+  DEV_BACKOFF[$id]="$(( backoff * 2 ))"
+  if (( changed )); then
+    MODEL_DIRTY=1
+  fi
+}
+
+apply_info_response() {
+  local id=$1 info=$2
   local normalized
   normalized=$(jq -cS '.' <<<"$info")
   if [[ "${DEV_INFO_JSON[$id]:-}" == "$normalized" ]]; then
-    return 1
+    return
   fi
   DEV_INFO_JSON[$id]="$normalized"
   DEV_VER[$id]=$(jq -r '.ver // ""' <<<"$normalized")
@@ -301,175 +497,104 @@ update_device_info() {
   fi
   DEV_INFO_TS[$id]=$(now_ts)
   MODEL_DIRTY=1
-  return 0
 }
 
-refresh_device_info_if_needed() {
+schedule_state_fetch() {
   local id=$1
-  local now
-  now=$(now_ts)
-  local last=${DEV_INFO_TS[$id]:-0}
-  local wled_name=${DEV_WLED_NAME[$id]:-}
-  if [[ -z "$wled_name" || $(( now - last )) -ge $INFO_REFRESH_TTL ]]; then
-    update_device_info "$id"
-    return $?
-  fi
-  return 1
-}
-
-refresh_selected_device() {
-  local id=$1
-  local changed=0
-  if update_device_state "$id"; then
-    changed=1
-  fi
-  if refresh_device_info_if_needed "$id"; then
-    changed=1
-  fi
-  if (( changed )); then
-    LAST_REFRESH_SELECTED=$(now_ts)
-  fi
-}
-
-refresh_all_devices() {
-  local id
-  for id in "${DEVICE_IDS[@]}"; do
-    local now
-    now=$(now_ts)
-    local next=${DEV_NEXT_POLL[$id]:-0}
-    if (( now >= next )); then
-      update_device_state "$id" || true
-      if [[ "${DEV_ONLINE[$id]:-0}" == "1" ]]; then
-        refresh_device_info_if_needed "$id" || true
-      fi
-    fi
-  done
-}
-
-brightness_adjust_active() {
-  local id=$1 now_ms=$2
-  if [[ -n "${DEV_PENDING_BRI[$id]:-}" ]]; then
-    return 0
-  fi
-  if [[ -n "${DEV_BRI_INFLIGHT_PID[$id]:-}" ]]; then
-    return 0
-  fi
-  local last=${DEV_LAST_BRI_INPUT_MS[$id]:-0}
-  if (( now_ms - last <= BRI_ACTIVE_WINDOW_MS )); then
-    return 0
-  fi
-  return 1
-}
-
-device_display_brightness() {
-  local id=$1
-  local bri=${DEV_UI_BRI[$id]:-}
-  if [[ -z "$bri" ]]; then
-    bri=${DEV_BRI[$id]:-0}
-  fi
-  printf '%s' "$bri"
-}
-
-brightness_pending_marker() {
-  local id=$1
-  local ui=${DEV_UI_BRI[$id]:-}
-  local dev=${DEV_BRI[$id]:-0}
-  if [[ -n "${DEV_PENDING_BRI[$id]:-}" || -n "${DEV_BRI_INFLIGHT_PID[$id]:-}" ]]; then
-    printf '*'
+  [[ -z "$id" ]] && return
+  if [[ -n "${DEV_GET_STATE_INFLIGHT_PID[$id]:-}" ]]; then
     return
   fi
-  if [[ -n "$ui" && "$ui" != "$dev" ]]; then
-    printf '*'
-  fi
+  DEV_GET_STATE_INFLIGHT_PID[$id]=$(start_get_request "$id" "state" "/json/state")
 }
 
-sync_ui_brightness_from_device() {
+schedule_info_fetch() {
   local id=$1
-  local now
-  now=$(now_ms)
-  if brightness_adjust_active "$id" "$now"; then
+  [[ -z "$id" ]] && return
+  if [[ -n "${DEV_GET_INFO_INFLIGHT_PID[$id]:-}" ]]; then
     return
   fi
-  local dev=${DEV_BRI[$id]:-0}
-  if [[ "${DEV_UI_BRI[$id]:-}" != "$dev" ]]; then
-    DEV_UI_BRI[$id]="$dev"
-    DEVICE_LIST_DIRTY=1
-  fi
+  DEV_GET_INFO_INFLIGHT_PID[$id]=$(start_get_request "$id" "info" "/json/info")
 }
 
-queue_brightness_update() {
-  local id=$1 bri=$2
+schedule_presets_fetch() {
+  local id=$1
+  [[ -z "$id" ]] && return
+  if [[ -n "${DEV_GET_PRESETS_INFLIGHT_PID[$id]:-}" ]]; then
+    return
+  fi
+  DEV_GET_PRESETS_INFLIGHT_PID[$id]=$(start_get_request "$id" "presets" "/json/presets")
+}
+
+schedule_effects_fetch() {
+  local id=$1
+  [[ -z "$id" ]] && return
+  if [[ -n "${DEV_GET_EFFECTS_INFLIGHT_PID[$id]:-}" ]]; then
+    return
+  fi
+  DEV_GET_EFFECTS_INFLIGHT_PID[$id]=$(start_get_request "$id" "effects" "/json/effects")
+}
+
+schedule_palettes_fetch() {
+  local id=$1
+  [[ -z "$id" ]] && return
+  if [[ -n "${DEV_GET_PALETTES_INFLIGHT_PID[$id]:-}" ]]; then
+    return
+  fi
+  DEV_GET_PALETTES_INFLIGHT_PID[$id]=$(start_get_request "$id" "palettes" "/json/palettes")
+}
+
+enqueue_patch() {
+  local id=$1 patch=$2
   local now
   now=$(now_ms)
-  DEV_UI_BRI[$id]="$bri"
-  DEV_PENDING_BRI[$id]="$bri"
-  DEV_PENDING_DUE_MS[$id]=$((now + BRI_DEBOUNCE_MS))
-  DEV_LAST_BRI_INPUT_MS[$id]="$now"
-  DEVICE_LIST_DIRTY=1
-}
-
-start_brightness_send() {
-  local id=$1 bri=$2
-  local url payload delay_ms
-  url="$(api_base_url "$id")/json/state"
-  payload="{\"bri\":$bri}"
-  delay_ms=${WLEDTUI_NET_DELAY_MS:-0}
-  if [[ "${WLEDTUI_ASYNC_DRY_RUN:-}" == "1" ]]; then
-    (
-      sleep_ms "$delay_ms"
-    ) &
+  DEV_LAST_USER_ACTION_MS[$id]="$now"
+  DEV_PATCH_DUE_MS[$id]=$((now + PATCH_DEBOUNCE_MS))
+  if [[ -n "${DEV_PENDING_PATCH[$id]:-}" ]]; then
+    DEV_PENDING_PATCH[$id]=$(jq -c -s '.[0] * .[1]' <<<"${DEV_PENDING_PATCH[$id]}"$'\n'"$patch")
   else
-    (
-      sleep_ms "$delay_ms"
-      curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
-        --silent --show-error --fail \
-        -H 'Content-Type: application/json' -X POST \
-        --data-binary "$payload" "$url" >/dev/null 2>&1
-    ) &
+    DEV_PENDING_PATCH[$id]="$patch"
   fi
-  DEV_BRI_INFLIGHT_PID[$id]=$!
-  DEV_BRI_INFLIGHT_VAL[$id]="$bri"
 }
 
-process_brightness_queue() {
+process_patch_queue() {
   local now
   now=$(now_ms)
   local dirty=0
   local id
   for id in "${DEVICE_IDS[@]}"; do
-    local pid=${DEV_BRI_INFLIGHT_PID[$id]:-}
+    local pid=${DEV_PATCH_INFLIGHT_PID[$id]:-}
     if [[ -n "$pid" ]]; then
       if kill -0 "$pid" 2>/dev/null; then
         continue
       fi
       wait "$pid" 2>/dev/null || true
-      DEV_BRI_INFLIGHT_PID[$id]=""
-      DEV_BRI_INFLIGHT_VAL[$id]=""
+      DEV_PATCH_INFLIGHT_PID[$id]=""
       dirty=1
     fi
-    local pending=${DEV_PENDING_BRI[$id]:-}
+    local pending=${DEV_PENDING_PATCH[$id]:-}
     [[ -z "$pending" ]] && continue
-    if [[ "${DEV_ONLINE[$id]:-0}" != "1" ]]; then
-      log_debug "brightness drop offline device=$id desired=$pending"
-      DEV_PENDING_BRI[$id]=""
-      DEV_PENDING_DUE_MS[$id]="0"
-      dirty=1
-      continue
-    fi
-    local due=${DEV_PENDING_DUE_MS[$id]:-0}
-    local last_send=${DEV_LAST_BRI_SEND_MS[$id]:-0}
-    local earliest=$((last_send + BRI_MIN_SEND_INTERVAL_MS))
+    local due=${DEV_PATCH_DUE_MS[$id]:-0}
+    local last_send=${DEV_PATCH_LAST_SEND_MS[$id]:-0}
+    local earliest=$((last_send + PATCH_MIN_SEND_INTERVAL_MS))
     if (( due < earliest )); then
       due=$earliest
-      DEV_PENDING_DUE_MS[$id]="$due"
+      DEV_PATCH_DUE_MS[$id]="$due"
+    fi
+    if [[ "${DEV_ONLINE[$id]:-0}" != "1" ]]; then
+      local offline_backoff=${DEV_BACKOFF[$id]:-2}
+      local offline_delay_ms=$((offline_backoff * 1000))
+      if (( now - last_send < offline_delay_ms )); then
+        continue
+      fi
     fi
     if (( now < due )); then
       continue
     fi
-    start_brightness_send "$id" "$pending"
-    DEV_PENDING_BRI[$id]=""
-    DEV_PENDING_DUE_MS[$id]="0"
-    DEV_LAST_BRI_SEND_MS[$id]="$now"
+    DEV_PATCH_INFLIGHT_PID[$id]=$(start_patch_send "$id" "$pending")
+    DEV_PENDING_PATCH[$id]=""
+    DEV_PATCH_DUE_MS[$id]="0"
+    DEV_PATCH_LAST_SEND_MS[$id]="$now"
   done
   if (( dirty )); then
     DEVICE_LIST_DIRTY=1
@@ -477,11 +602,167 @@ process_brightness_queue() {
   fi
 }
 
+process_get_result() {
+  local id=$1 type=$2
+  local status_file data_file
+  status_file=$(net_status_path "$id" "$type")
+  data_file=$(net_data_path "$id" "$type")
+  if [[ ! -f "$status_file" ]]; then
+    return
+  fi
+  local status_line exit_code
+  status_line=$(cat "$status_file" 2>/dev/null || true)
+  rm -f "$status_file"
+  exit_code=$(awk '{print $1}' <<<"$status_line")
+  case "$type" in
+    state)
+      if [[ "$exit_code" != "0" || ! -f "$data_file" ]]; then
+        apply_state_failure "$id"
+      else
+        local state
+        state=$(cat "$data_file" 2>/dev/null || true)
+        if [[ -n "$state" ]]; then
+          apply_state_response "$id" "$state"
+          if [[ "$id" == "$(current_device_id)" ]]; then
+            LAST_REFRESH_SELECTED=$(now_ts)
+          fi
+        fi
+      fi
+      ;;
+    info)
+      if [[ "$exit_code" == "0" && -f "$data_file" ]]; then
+        local info
+        info=$(cat "$data_file" 2>/dev/null || true)
+        [[ -n "$info" ]] && apply_info_response "$id" "$info"
+      fi
+      ;;
+    presets)
+      if [[ "$exit_code" == "0" && -f "$data_file" ]]; then
+        DEV_PRESETS_JSON[$id]=$(cat "$data_file" 2>/dev/null || true)
+        if [[ "$id" == "$(current_device_id)" && "$TAB_INDEX" == "1" ]]; then
+          with_lock "$PRESETS_LOCK" fetch_presets_locked "$id"
+          UI_DIRTY=1
+        fi
+      fi
+      ;;
+    effects)
+      if [[ "$exit_code" == "0" && -f "$data_file" ]]; then
+        DEV_EFFECTS_JSON[$id]=$(cat "$data_file" 2>/dev/null || true)
+        if [[ "$id" == "$(current_device_id)" && "$TAB_INDEX" == "2" ]]; then
+          load_effects_from_cache "$id"
+          UI_DIRTY=1
+        fi
+      fi
+      ;;
+    palettes)
+      if [[ "$exit_code" == "0" && -f "$data_file" ]]; then
+        DEV_PALETTES_JSON[$id]=$(cat "$data_file" 2>/dev/null || true)
+        if [[ "$id" == "$(current_device_id)" && "$TAB_INDEX" == "3" ]]; then
+          load_palettes_from_cache "$id"
+          UI_DIRTY=1
+        fi
+      fi
+      ;;
+  esac
+  local pid
+  case "$type" in
+    state) pid=${DEV_GET_STATE_INFLIGHT_PID[$id]:-} ;;
+    info) pid=${DEV_GET_INFO_INFLIGHT_PID[$id]:-} ;;
+    presets) pid=${DEV_GET_PRESETS_INFLIGHT_PID[$id]:-} ;;
+    effects) pid=${DEV_GET_EFFECTS_INFLIGHT_PID[$id]:-} ;;
+    palettes) pid=${DEV_GET_PALETTES_INFLIGHT_PID[$id]:-} ;;
+  esac
+  if [[ -n "$pid" ]]; then
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" 2>/dev/null || true
+      case "$type" in
+        state) DEV_GET_STATE_INFLIGHT_PID[$id]="" ;;
+        info) DEV_GET_INFO_INFLIGHT_PID[$id]="" ;;
+        presets) DEV_GET_PRESETS_INFLIGHT_PID[$id]="" ;;
+        effects) DEV_GET_EFFECTS_INFLIGHT_PID[$id]="" ;;
+        palettes) DEV_GET_PALETTES_INFLIGHT_PID[$id]="" ;;
+      esac
+    fi
+  fi
+}
+
+process_network_queue() {
+  process_patch_queue
+  local id
+  for id in "${DEVICE_IDS[@]}"; do
+    process_get_result "$id" "state"
+    process_get_result "$id" "info"
+    process_get_result "$id" "presets"
+    process_get_result "$id" "effects"
+    process_get_result "$id" "palettes"
+  done
+}
+
+start_discover_scan() {
+  if [[ -n "$DISCOVER_INFLIGHT_PID" ]]; then
+    if kill -0 "$DISCOVER_INFLIGHT_PID" 2>/dev/null; then
+      return
+    fi
+  fi
+  ensure_net_spool_dir
+  local outfile statusfile tmp delay_ms
+  outfile="$CACHE_DIR/net/discover.results"
+  statusfile="$CACHE_DIR/net/discover.status"
+  tmp="${outfile}.tmp.$$"
+  delay_ms=${WLEDTUI_NET_DELAY_MS:-0}
+  (
+    sleep_ms "$delay_ms"
+    local exit_code=0
+    if discover_devices_report > "$tmp" 2>/dev/null; then
+      mv "$tmp" "$outfile"
+    else
+      exit_code=$?
+      rm -f "$tmp"
+    fi
+    printf '%s %s\n' "$exit_code" "$(now_ts)" > "$statusfile"
+  ) &
+  DISCOVER_INFLIGHT_PID=$!
+}
+
+process_discover_results() {
+  local statusfile outfile
+  statusfile="$CACHE_DIR/net/discover.status"
+  outfile="$CACHE_DIR/net/discover.results"
+  if [[ ! -f "$statusfile" ]]; then
+    return
+  fi
+  local status_line exit_code
+  status_line=$(cat "$statusfile" 2>/dev/null || true)
+  rm -f "$statusfile"
+  exit_code=$(awk '{print $1}' <<<"$status_line")
+  if [[ "$exit_code" == "0" && -f "$outfile" ]]; then
+    local now
+    now=$(now_ts)
+    local entry name host port
+    while IFS= read -r entry; do
+      [[ -z "$entry" ]] && continue
+      IFS='|' read -r name host port <<<"$entry"
+      model_add_device "$name" "$host" "$port"
+      local id
+      id=$(device_id "$host" "$port")
+      DEV_LAST_SEEN[$id]="$now"
+    done < "$outfile"
+    DEVICE_LIST_DIRTY=1
+    UI_DIRTY=1
+    model_save_devices
+  fi
+  if [[ -n "$DISCOVER_INFLIGHT_PID" ]]; then
+    if ! kill -0 "$DISCOVER_INFLIGHT_PID" 2>/dev/null; then
+      wait "$DISCOVER_INFLIGHT_PID" 2>/dev/null || true
+      DISCOVER_INFLIGHT_PID=""
+    fi
+  fi
+}
+
 apply_state_payload() {
   local id=$1 payload=$2
   MODEL_BUSY=1
   if api_set_state "$id" "$payload" >/dev/null; then
-    refresh_selected_device "$id"
     MODEL_BUSY=0
     UI_DIRTY=1
     return 0
@@ -570,8 +851,8 @@ rebuild_device_cache() {
     bri=$(device_display_brightness "$id")
     local pending
     pending=$(brightness_pending_marker "$id")
-    preset=${DEV_PRESET[$id]:-0}
-    on=${DEV_ON[$id]:-false}
+    preset=$(device_display_preset "$id")
+    on=$(device_display_on "$id")
     marker="off"
     if [[ "$on" == "true" ]]; then
       marker="on"
@@ -872,12 +1153,14 @@ build_status_lines() {
   local ver=${DEV_VER[$id]}
   local wifi=${DEV_WIFI[$id]}
   local uptime=${DEV_UPTIME[$id]}
-  local on=${DEV_ON[$id]}
+  local on
+  on=$(device_display_on "$id")
   local bri
   bri=$(device_display_brightness "$id")
   local pending
   pending=$(brightness_pending_marker "$id")
-  local preset=${DEV_PRESET[$id]}
+  local preset
+  preset=$(device_display_preset "$id")
   set_right_line 0 "$width" "Device: $name"
   set_right_line 1 "$width" "Version: $ver"
   set_right_line 2 "$width" "WiFi signal: $wifi"
@@ -972,10 +1255,13 @@ build_advanced_lines() {
     set_right_line 0 "$width" "No state loaded."
     return
   fi
-  local transition=${DEV_TRANSITION[$id]:-0}
-  local night_on=${DEV_NL_ON[$id]:-false}
+  local transition
+  transition=$(device_display_transition "$id")
+  local night_on
+  night_on=$(device_display_nl_on "$id")
   local night_dur=${DEV_NL_DUR[$id]:-0}
-  local live=${DEV_LIVE[$id]:-false}
+  local live
+  live=$(device_display_live "$id")
   set_right_line 0 "$width" "Transition: $transition (Left/Right)"
   set_right_line 1 "$width" "Nightlight: $night_on dur:$night_dur (Enter toggles)"
   set_right_line 2 "$width" "Live mode: $live (l toggles)"
@@ -1271,7 +1557,10 @@ handle_key() {
       UI_DIRTY=1
       ;;
     r)
-      [[ -n "$id" ]] && refresh_selected_device "$id"
+      if [[ -n "$id" ]]; then
+        schedule_state_fetch "$id"
+        schedule_info_fetch "$id"
+      fi
       UI_DIRTY=1
       ;;
     a)
@@ -1287,8 +1576,7 @@ handle_key() {
       UI_DIRTY=1
       ;;
     s)
-      discover_devices
-      model_save_devices
+      start_discover_scan
       UI_DIRTY=1
       ;;
     '?')
@@ -1468,17 +1756,18 @@ handle_left() {
       bri=$(device_display_brightness "$id")
       bri=$((bri-BRI_STEP))
       bri=$(clamp "$bri" 0 255)
-      queue_brightness_update "$id" "$bri"
+      DEV_UI_BRI[$id]="$bri"
+      DEV_DESIRED_BRI[$id]="$bri"
+      enqueue_patch "$id" "$(jq -n --argjson bri "$bri" '{bri:$bri}')"
+      DEVICE_LIST_DIRTY=1
       ;;
     5)
-      local state=${DEV_STATE_JSON[$id]}
       local transition
-      transition=$(jq -r '.transition // 0' <<<"$state")
+      transition=$(device_display_transition "$id")
       transition=$((transition-1))
       transition=$(clamp "$transition" 0 255)
-      local payload
-      payload=$(jq -n --argjson transition "$transition" '{transition:$transition}')
-      apply_state_payload "$id" "$payload"
+      DEV_DESIRED_TRANSITION[$id]="$transition"
+      enqueue_patch "$id" "$(jq -n --argjson transition "$transition" '{transition:$transition}')"
       ;;
     2)
       local seg=${SEGMENTS[$SEGMENT_INDEX]}
@@ -1488,24 +1777,26 @@ handle_left() {
         current=$(jq -r '.sx // 0' <<<"$seg")
         current=$((current-5))
         current=$(clamp "$current" 0 255)
-        local payload
+        seg=$(jq -c --argjson sx "$current" '.sx=$sx' <<<"$seg")
+        SEGMENTS[$SEGMENT_INDEX]="$seg"
+        update_segment_texts
         if (( SEG_APPLY_ALL )); then
-          payload=$(jq -n --argjson sx "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,sx:$sx}],applyAll:true}')
+          enqueue_patch "$id" "$(jq -n --argjson sx "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,sx:$sx}],applyAll:true}')"
         else
-          payload=$(jq -n --argjson sx "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,sx:$sx}]}')
+          enqueue_patch "$id" "$(jq -n --argjson sx "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,sx:$sx}]}')"
         fi
-        apply_state_payload "$id" "$payload"
       else
         current=$(jq -r '.ix // 0' <<<"$seg")
         current=$((current-5))
         current=$(clamp "$current" 0 255)
-        local payload
+        seg=$(jq -c --argjson ix "$current" '.ix=$ix' <<<"$seg")
+        SEGMENTS[$SEGMENT_INDEX]="$seg"
+        update_segment_texts
         if (( SEG_APPLY_ALL )); then
-          payload=$(jq -n --argjson ix "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,ix:$ix}],applyAll:true}')
+          enqueue_patch "$id" "$(jq -n --argjson ix "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,ix:$ix}],applyAll:true}')"
         else
-          payload=$(jq -n --argjson ix "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,ix:$ix}]}')
+          enqueue_patch "$id" "$(jq -n --argjson ix "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,ix:$ix}]}')"
         fi
-        apply_state_payload "$id" "$payload"
       fi
       ;;
     4)
@@ -1520,13 +1811,14 @@ handle_left() {
         1) g=$((g-5)); g=$(clamp "$g" 0 255) ;;
         2) b=$((b-5)); b=$(clamp "$b" 0 255) ;;
       esac
-      local payload
+      seg=$(jq -c --argjson r "$r" --argjson g "$g" --argjson b "$b" '.col[0]=[$r,$g,$b]' <<<"$seg")
+      SEGMENTS[$SEGMENT_INDEX]="$seg"
+      update_segment_texts
       if (( SEG_APPLY_ALL )); then
-        payload=$(jq -n --argjson r "$r" --argjson g "$g" --argjson b "$b" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}],applyAll:true}')
+        enqueue_patch "$id" "$(jq -n --argjson r "$r" --argjson g "$g" --argjson b "$b" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}],applyAll:true}')"
       else
-        payload=$(jq -n --argjson id "$SEGMENT_INDEX" --argjson r "$r" --argjson g "$g" --argjson b "$b" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}]}')
+        enqueue_patch "$id" "$(jq -n --argjson id "$SEGMENT_INDEX" --argjson r "$r" --argjson g "$g" --argjson b "$b" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}]}')"
       fi
-      apply_state_payload "$id" "$payload"
       ;;
   esac
 }
@@ -1541,17 +1833,18 @@ handle_right() {
       bri=$(device_display_brightness "$id")
       bri=$((bri+BRI_STEP))
       bri=$(clamp "$bri" 0 255)
-      queue_brightness_update "$id" "$bri"
+      DEV_UI_BRI[$id]="$bri"
+      DEV_DESIRED_BRI[$id]="$bri"
+      enqueue_patch "$id" "$(jq -n --argjson bri "$bri" '{bri:$bri}')"
+      DEVICE_LIST_DIRTY=1
       ;;
     5)
-      local state=${DEV_STATE_JSON[$id]}
       local transition
-      transition=$(jq -r '.transition // 0' <<<"$state")
+      transition=$(device_display_transition "$id")
       transition=$((transition+1))
       transition=$(clamp "$transition" 0 255)
-      local payload
-      payload=$(jq -n --argjson transition "$transition" '{transition:$transition}')
-      apply_state_payload "$id" "$payload"
+      DEV_DESIRED_TRANSITION[$id]="$transition"
+      enqueue_patch "$id" "$(jq -n --argjson transition "$transition" '{transition:$transition}')"
       ;;
     2)
       local seg=${SEGMENTS[$SEGMENT_INDEX]}
@@ -1561,24 +1854,26 @@ handle_right() {
         current=$(jq -r '.sx // 0' <<<"$seg")
         current=$((current+5))
         current=$(clamp "$current" 0 255)
-        local payload
+        seg=$(jq -c --argjson sx "$current" '.sx=$sx' <<<"$seg")
+        SEGMENTS[$SEGMENT_INDEX]="$seg"
+        update_segment_texts
         if (( SEG_APPLY_ALL )); then
-          payload=$(jq -n --argjson sx "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,sx:$sx}],applyAll:true}')
+          enqueue_patch "$id" "$(jq -n --argjson sx "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,sx:$sx}],applyAll:true}')"
         else
-          payload=$(jq -n --argjson sx "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,sx:$sx}]}')
+          enqueue_patch "$id" "$(jq -n --argjson sx "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,sx:$sx}]}')"
         fi
-        apply_state_payload "$id" "$payload"
       else
         current=$(jq -r '.ix // 0' <<<"$seg")
         current=$((current+5))
         current=$(clamp "$current" 0 255)
-        local payload
+        seg=$(jq -c --argjson ix "$current" '.ix=$ix' <<<"$seg")
+        SEGMENTS[$SEGMENT_INDEX]="$seg"
+        update_segment_texts
         if (( SEG_APPLY_ALL )); then
-          payload=$(jq -n --argjson ix "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,ix:$ix}],applyAll:true}')
+          enqueue_patch "$id" "$(jq -n --argjson ix "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,ix:$ix}],applyAll:true}')"
         else
-          payload=$(jq -n --argjson ix "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,ix:$ix}]}')
+          enqueue_patch "$id" "$(jq -n --argjson ix "$current" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,ix:$ix}]}')"
         fi
-        apply_state_payload "$id" "$payload"
       fi
       ;;
     4)
@@ -1593,13 +1888,14 @@ handle_right() {
         1) g=$((g+5)); g=$(clamp "$g" 0 255) ;;
         2) b=$((b+5)); b=$(clamp "$b" 0 255) ;;
       esac
-      local payload
+      seg=$(jq -c --argjson r "$r" --argjson g "$g" --argjson b "$b" '.col[0]=[$r,$g,$b]' <<<"$seg")
+      SEGMENTS[$SEGMENT_INDEX]="$seg"
+      update_segment_texts
       if (( SEG_APPLY_ALL )); then
-        payload=$(jq -n --argjson r "$r" --argjson g "$g" --argjson b "$b" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}],applyAll:true}')
+        enqueue_patch "$id" "$(jq -n --argjson r "$r" --argjson g "$g" --argjson b "$b" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}],applyAll:true}')"
       else
-        payload=$(jq -n --argjson id "$SEGMENT_INDEX" --argjson r "$r" --argjson g "$g" --argjson b "$b" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}]}')
+        enqueue_patch "$id" "$(jq -n --argjson id "$SEGMENT_INDEX" --argjson r "$r" --argjson g "$g" --argjson b "$b" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}]}')"
       fi
-      apply_state_payload "$id" "$payload"
       ;;
   esac
 }
@@ -1609,49 +1905,55 @@ handle_enter() {
   [[ -z "$id" ]] && return
   case "$TAB_INDEX" in
     0)
-      local on=${DEV_ON[$id]}
+      local on
+      on=$(device_display_on "$id")
       local new_on
       if [[ "$on" == "true" ]]; then
         new_on=false
       else
         new_on=true
       fi
-      local payload
-      payload=$(jq -n --argjson on "$new_on" '{on:$on}')
-      apply_state_payload "$id" "$payload"
-      DEV_ON[$id]="$new_on"
+      DEV_DESIRED_ON[$id]="$new_on"
+      enqueue_patch "$id" "$(jq -n --argjson on "$new_on" '{on:$on}')"
+      DEVICE_LIST_DIRTY=1
       ;;
     1)
       local preset_id
       preset_id=$(with_lock "$PRESETS_LOCK" get_selected_preset_id)
       if [[ -n "$preset_id" ]]; then
-        local payload
-        payload=$(jq -n --argjson ps "$preset_id" '{ps:$ps}')
-        apply_state_payload "$id" "$payload"
-        DEV_PRESET[$id]="$preset_id"
-        refresh_selected_device "$id"
+        DEV_DESIRED_PRESET[$id]="$preset_id"
+        enqueue_patch "$id" "$(jq -n --argjson ps "$preset_id" '{ps:$ps}')"
+        DEVICE_LIST_DIRTY=1
       fi
       ;;
     2)
       if [[ -n "${EFFECTS[$EFFECT_INDEX]:-}" ]]; then
-        local payload
-        if (( SEG_APPLY_ALL )); then
-          payload=$(jq -n --argjson fx "$EFFECT_INDEX" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,fx:$fx}],applyAll:true}')
-        else
-          payload=$(jq -n --argjson fx "$EFFECT_INDEX" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,fx:$fx}]}')
+        local seg=${SEGMENTS[$SEGMENT_INDEX]:-}
+        if [[ -n "$seg" ]]; then
+          seg=$(jq -c --argjson fx "$EFFECT_INDEX" '.fx=$fx' <<<"$seg")
+          SEGMENTS[$SEGMENT_INDEX]="$seg"
+          update_segment_texts
+          if (( SEG_APPLY_ALL )); then
+            enqueue_patch "$id" "$(jq -n --argjson fx "$EFFECT_INDEX" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,fx:$fx}],applyAll:true}')"
+          else
+            enqueue_patch "$id" "$(jq -n --argjson fx "$EFFECT_INDEX" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,fx:$fx}]}')"
+          fi
         fi
-        apply_state_payload "$id" "$payload"
       fi
       ;;
     3)
       if [[ -n "${PALETTES[$PALETTE_INDEX]:-}" ]]; then
-        local payload
-        if (( SEG_APPLY_ALL )); then
-          payload=$(jq -n --argjson pal "$PALETTE_INDEX" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,pal:$pal}],applyAll:true}')
-        else
-          payload=$(jq -n --argjson pal "$PALETTE_INDEX" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,pal:$pal}]}')
+        local seg=${SEGMENTS[$SEGMENT_INDEX]:-}
+        if [[ -n "$seg" ]]; then
+          seg=$(jq -c --argjson pal "$PALETTE_INDEX" '.pal=$pal' <<<"$seg")
+          SEGMENTS[$SEGMENT_INDEX]="$seg"
+          update_segment_texts
+          if (( SEG_APPLY_ALL )); then
+            enqueue_patch "$id" "$(jq -n --argjson pal "$PALETTE_INDEX" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,pal:$pal}],applyAll:true}')"
+          else
+            enqueue_patch "$id" "$(jq -n --argjson pal "$PALETTE_INDEX" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,pal:$pal}]}')"
+          fi
         fi
-        apply_state_payload "$id" "$payload"
       fi
       ;;
     4)
@@ -1665,28 +1967,27 @@ handle_enter() {
         else
           new_on=true
         fi
-        local payload
+        seg=$(jq -c --argjson on "$new_on" '.on=$on' <<<"$seg")
+        SEGMENTS[$SEGMENT_INDEX]="$seg"
+        update_segment_texts
         if (( SEG_APPLY_ALL )); then
-          payload=$(jq -n --argjson on "$new_on" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,on:$on}],applyAll:true}')
+          enqueue_patch "$id" "$(jq -n --argjson on "$new_on" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,on:$on}],applyAll:true}')"
         else
-          payload=$(jq -n --argjson on "$new_on" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,on:$on}]}')
+          enqueue_patch "$id" "$(jq -n --argjson on "$new_on" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,on:$on}]}')"
         fi
-        apply_state_payload "$id" "$payload"
       fi
       ;;
     5)
-      local state=${DEV_STATE_JSON[$id]}
       local night_on
-      night_on=$(jq -r '.nl.on // false' <<<"$state")
+      night_on=$(device_display_nl_on "$id")
       local new_on
       if [[ "$night_on" == "true" ]]; then
         new_on=false
       else
         new_on=true
       fi
-      local payload
-      payload=$(jq -n --argjson on "$new_on" '{nl:{on:$on}}')
-      apply_state_payload "$id" "$payload"
+      DEV_DESIRED_NL_ON[$id]="$new_on"
+      enqueue_patch "$id" "$(jq -n --argjson on "$new_on" '{nl:{on:$on}}')"
       ;;
   esac
 }
@@ -1755,38 +2056,34 @@ handle_edit_device() {
 handle_live_toggle() {
   local id=$1
   [[ -z "$id" ]] && return
-  local state=${DEV_STATE_JSON[$id]}
   local live
-  live=$(jq -r '.live // false' <<<"$state")
+  live=$(device_display_live "$id")
   local new_live
   if [[ "$live" == "true" ]]; then
     new_live=false
   else
     new_live=true
   fi
-  local payload
-  payload=$(jq -n --argjson live "$new_live" '{live:$live}')
-  apply_state_payload "$id" "$payload"
+  DEV_DESIRED_LIVE[$id]="$new_live"
+  enqueue_patch "$id" "$(jq -n --argjson live "$new_live" '{live:$live}')"
 }
 
 handle_reboot() {
   local id=$1
   [[ -z "$id" ]] && return
   if confirm_prompt "Reboot $(device_display_name "$id")?"; then
-    local payload
-    payload=$(jq -n '{rb:true}')
-    apply_state_payload "$id" "$payload"
+    enqueue_patch "$id" "$(jq -n '{rb:true}')"
   fi
 }
 
 smoke_test_brightness_repeat() {
   local id=$1
-  local old_debounce=$BRI_DEBOUNCE_MS
-  local old_min_interval=$BRI_MIN_SEND_INTERVAL_MS
+  local old_debounce=$PATCH_DEBOUNCE_MS
+  local old_min_interval=$PATCH_MIN_SEND_INTERVAL_MS
   local old_dry=${WLEDTUI_ASYNC_DRY_RUN:-}
   local old_delay=${WLEDTUI_NET_DELAY_MS:-}
-  BRI_DEBOUNCE_MS=0
-  BRI_MIN_SEND_INTERVAL_MS=0
+  PATCH_DEBOUNCE_MS=0
+  PATCH_MIN_SEND_INTERVAL_MS=0
   export WLEDTUI_ASYNC_DRY_RUN=1
   export WLEDTUI_NET_DELAY_MS="${WLEDTUI_NET_DELAY_MS:-200}"
   DEV_ONLINE[$id]="1"
@@ -1794,15 +2091,18 @@ smoke_test_brightness_repeat() {
   local start_ms end_ms elapsed i
   start_ms=$(now_ms)
   for ((i=0; i<80; i++)); do
-    queue_brightness_update "$id" "$(( (i * BRI_STEP) % 256 ))"
-    process_brightness_queue
+    local bri=$(( (i * BRI_STEP) % 256 ))
+    DEV_UI_BRI[$id]="$bri"
+    DEV_DESIRED_BRI[$id]="$bri"
+    enqueue_patch "$id" "$(jq -n --argjson bri "$bri" '{bri:$bri}')"
+    process_network_queue
   done
   end_ms=$(now_ms)
   elapsed=$((end_ms - start_ms))
   if (( elapsed > 500 )); then
     printf 'Brightness repeat loop took %sms (expected < 500ms)\n' "$elapsed" >&2
-    BRI_DEBOUNCE_MS=$old_debounce
-    BRI_MIN_SEND_INTERVAL_MS=$old_min_interval
+    PATCH_DEBOUNCE_MS=$old_debounce
+    PATCH_MIN_SEND_INTERVAL_MS=$old_min_interval
     if [[ -z "$old_dry" ]]; then
       unset WLEDTUI_ASYNC_DRY_RUN
     else
@@ -1816,9 +2116,9 @@ smoke_test_brightness_repeat() {
     return 1
   fi
   sleep_ms 250
-  process_brightness_queue
-  BRI_DEBOUNCE_MS=$old_debounce
-  BRI_MIN_SEND_INTERVAL_MS=$old_min_interval
+  process_network_queue
+  PATCH_DEBOUNCE_MS=$old_debounce
+  PATCH_MIN_SEND_INTERVAL_MS=$old_min_interval
   if [[ -z "$old_dry" ]]; then
     unset WLEDTUI_ASYNC_DRY_RUN
   else
@@ -1918,17 +2218,22 @@ main_loop() {
   while true; do
     local now
     now=$(now_ts)
-    process_brightness_queue
-    if (( MODEL_BUSY == 0 && now - LAST_POLL_ALL >= 8 )); then
-      refresh_all_devices
-      LAST_POLL_ALL=$now
-    fi
+    process_network_queue
+    process_discover_results
     local id
-    id=$(current_device_id)
-    if [[ -n "$id" ]] && (( MODEL_BUSY == 0 && now - LAST_POLL_SELECTED >= 2 )); then
-      refresh_selected_device "$id"
-      LAST_POLL_SELECTED=$now
-    fi
+    for id in "${DEVICE_IDS[@]}"; do
+      local next=${DEV_NEXT_POLL[$id]:-0}
+      if (( now >= next )); then
+        schedule_state_fetch "$id"
+      fi
+      if [[ "${DEV_ONLINE[$id]:-0}" == "1" ]]; then
+        local last_info=${DEV_INFO_TS[$id]:-0}
+        local wled_name=${DEV_WLED_NAME[$id]:-}
+        if [[ -z "$wled_name" || $(( now - last_info )) -ge $INFO_REFRESH_TTL ]]; then
+          schedule_info_fetch "$id"
+        fi
+      fi
+    done
     if (( RESIZED )); then
       render_set_size
       RESIZED=0
