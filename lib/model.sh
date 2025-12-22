@@ -16,12 +16,22 @@ declare -A DEV_ONLINE=()
 declare -A DEV_LAST_SEEN=()
 declare -A DEV_BRI=()
 declare -A DEV_UI_BRI=()
-declare -A DEV_PENDING_BRI=()
-declare -A DEV_PENDING_DUE_MS=()
-declare -A DEV_BRI_INFLIGHT_PID=()
-declare -A DEV_BRI_INFLIGHT_VAL=()
-declare -A DEV_LAST_BRI_SEND_MS=()
-declare -A DEV_LAST_BRI_INPUT_MS=()
+declare -A DEV_DESIRED_BRI=()
+declare -A DEV_DESIRED_ON=()
+declare -A DEV_DESIRED_PRESET=()
+declare -A DEV_DESIRED_TRANSITION=()
+declare -A DEV_DESIRED_NL_ON=()
+declare -A DEV_DESIRED_LIVE=()
+declare -A DEV_PENDING_PATCH=()
+declare -A DEV_PATCH_DUE_MS=()
+declare -A DEV_PATCH_INFLIGHT_PID=()
+declare -A DEV_PATCH_LAST_SEND_MS=()
+declare -A DEV_LAST_USER_ACTION_MS=()
+declare -A DEV_GET_STATE_INFLIGHT_PID=()
+declare -A DEV_GET_INFO_INFLIGHT_PID=()
+declare -A DEV_GET_PRESETS_INFLIGHT_PID=()
+declare -A DEV_GET_EFFECTS_INFLIGHT_PID=()
+declare -A DEV_GET_PALETTES_INFLIGHT_PID=()
 declare -A DEV_ON=()
 declare -A DEV_PRESET=()
 declare -A DEV_VER=()
@@ -35,6 +45,9 @@ declare -A DEV_TRANSITION=()
 declare -A DEV_NL_ON=()
 declare -A DEV_NL_DUR=()
 declare -A DEV_LIVE=()
+declare -A DEV_PRESETS_JSON=()
+declare -A DEV_EFFECTS_JSON=()
+declare -A DEV_PALETTES_JSON=()
 
 device_id() {
   local host=$1 port=$2
@@ -65,12 +78,22 @@ model_add_device() {
   DEV_LAST_SEEN[$id]="0"
   DEV_BRI[$id]="0"
   DEV_UI_BRI[$id]="0"
-  DEV_PENDING_BRI[$id]=""
-  DEV_PENDING_DUE_MS[$id]="0"
-  DEV_BRI_INFLIGHT_PID[$id]=""
-  DEV_BRI_INFLIGHT_VAL[$id]=""
-  DEV_LAST_BRI_SEND_MS[$id]="0"
-  DEV_LAST_BRI_INPUT_MS[$id]="0"
+  DEV_DESIRED_BRI[$id]=""
+  DEV_DESIRED_ON[$id]=""
+  DEV_DESIRED_PRESET[$id]=""
+  DEV_DESIRED_TRANSITION[$id]=""
+  DEV_DESIRED_NL_ON[$id]=""
+  DEV_DESIRED_LIVE[$id]=""
+  DEV_PENDING_PATCH[$id]=""
+  DEV_PATCH_DUE_MS[$id]="0"
+  DEV_PATCH_INFLIGHT_PID[$id]=""
+  DEV_PATCH_LAST_SEND_MS[$id]="0"
+  DEV_LAST_USER_ACTION_MS[$id]="0"
+  DEV_GET_STATE_INFLIGHT_PID[$id]=""
+  DEV_GET_INFO_INFLIGHT_PID[$id]=""
+  DEV_GET_PRESETS_INFLIGHT_PID[$id]=""
+  DEV_GET_EFFECTS_INFLIGHT_PID[$id]=""
+  DEV_GET_PALETTES_INFLIGHT_PID[$id]=""
   DEV_ON[$id]="0"
   DEV_PRESET[$id]="0"
   DEV_VER[$id]=""
@@ -85,6 +108,9 @@ model_add_device() {
   DEV_NL_ON[$id]="false"
   DEV_NL_DUR[$id]="0"
   DEV_LIVE[$id]="false"
+  DEV_PRESETS_JSON[$id]=""
+  DEV_EFFECTS_JSON[$id]=""
+  DEV_PALETTES_JSON[$id]=""
 }
 
 model_remove_device() {
@@ -97,12 +123,17 @@ model_remove_device() {
   done
   DEVICE_IDS=("${new_ids[@]}")
   unset DEV_NAME[$id] DEV_ALIAS[$id] DEV_WLED_NAME[$id] DEV_HOST[$id] DEV_PORT[$id] DEV_ONLINE[$id] DEV_LAST_SEEN[$id]
-  unset DEV_BRI[$id] DEV_UI_BRI[$id] DEV_PENDING_BRI[$id] DEV_PENDING_DUE_MS[$id]
-  unset DEV_BRI_INFLIGHT_PID[$id] DEV_BRI_INFLIGHT_VAL[$id] DEV_LAST_BRI_SEND_MS[$id] DEV_LAST_BRI_INPUT_MS[$id]
+  unset DEV_BRI[$id] DEV_UI_BRI[$id] DEV_DESIRED_BRI[$id] DEV_DESIRED_ON[$id] DEV_DESIRED_PRESET[$id]
+  unset DEV_DESIRED_TRANSITION[$id] DEV_DESIRED_NL_ON[$id] DEV_DESIRED_LIVE[$id]
+  unset DEV_PENDING_PATCH[$id] DEV_PATCH_DUE_MS[$id] DEV_PATCH_INFLIGHT_PID[$id] DEV_PATCH_LAST_SEND_MS[$id]
+  unset DEV_LAST_USER_ACTION_MS[$id]
+  unset DEV_GET_STATE_INFLIGHT_PID[$id] DEV_GET_INFO_INFLIGHT_PID[$id]
+  unset DEV_GET_PRESETS_INFLIGHT_PID[$id] DEV_GET_EFFECTS_INFLIGHT_PID[$id] DEV_GET_PALETTES_INFLIGHT_PID[$id]
   unset DEV_ON[$id] DEV_PRESET[$id] DEV_VER[$id] DEV_WIFI[$id]
   unset DEV_UPTIME[$id] DEV_STATE_JSON[$id] DEV_INFO_JSON[$id] DEV_INFO_TS[$id]
   unset DEV_NEXT_POLL[$id] DEV_BACKOFF[$id]
   unset DEV_TRANSITION[$id] DEV_NL_ON[$id] DEV_NL_DUR[$id] DEV_LIVE[$id]
+  unset DEV_PRESETS_JSON[$id] DEV_EFFECTS_JSON[$id] DEV_PALETTES_JSON[$id]
 }
 
 device_display_name() {
