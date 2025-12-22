@@ -7,9 +7,9 @@ WLED TUI provides a full-screen Bash TUI (tput/stty) for discovering and managin
 
 ## Features
 - Multi-device support with quick switching and a per-device online/offline indicator.
-- Bonjour/mDNS discovery using Avahi (`avahi-browse`), probing `_wled._tcp` first and falling back to `_http._tcp` with a `/json/info` probe.
+- Manual device discovery (press `s`) using Avahi (`avahi-browse`), probing `_wled._tcp` first and falling back to `_http._tcp` with a `/json/info` probe.
 - Manual device add, edit, and remove (host:port).
-- Device cache stored in `~/.config/wledtui/devices.json` (respects `XDG_CONFIG_HOME`).
+- Persistent device cache stored in `~/.cache/wledtui/devices.json` (respects `XDG_CACHE_HOME`).
 - Status tab: power toggle and brightness adjustments.
 - Presets tab: list and apply presets from `/presets.json` (fallback to `/json/presets`).
 - Effects tab: list/apply effects; adjust speed or intensity per segment.
@@ -17,24 +17,28 @@ WLED TUI provides a full-screen Bash TUI (tput/stty) for discovering and managin
 - Segments tab: toggle segment on/off, edit primary RGB color, and apply changes to all segments.
 - Advanced tab: adjust transition time, toggle nightlight, toggle live mode, and reboot.
 - Help overlay and footer key legend.
-- Polling with backoff: selected device refreshes about every 2s, all devices about every 8s, with offline retry backoff up to 30s.
+- Refresh requests are asynchronous; the UI stays responsive and keeps cached state visible while updates arrive.
 - Debug logging via `WLEDTUI_DEBUG=1` to `~/.cache/wledtui/debug.log` (respects `XDG_CACHE_HOME`).
 - Optional smoke test mode (`./wledtui --smoke HOST:PORT`).
 
-## Startup behavior (scan before draw)
-On startup, WLED TUI performs an mDNS/Bonjour scan using Avahi (`avahi-browse`) **before drawing the UI**, so the device list is populated immediately when the interface renders. Discovery requires:
-- `avahi-daemon` running and reachable on the host.
-- `avahi-browse` installed (typically provided by `avahi-utils` or `avahi-tools`).
-- mDNS/Bonjour traffic allowed (UDP 5353); ensure your firewall and network allow multicast and that WLED devices are on the same L2/VLAN or an mDNS reflector is configured.
+## Startup behavior (no scan on launch)
+On startup, WLED TUI **does not** perform any device scan or network/mDNS calls. The UI renders immediately using cached device data from the last session. If no cache exists, the UI shows:
 
-If no `_wled._tcp` services are found, WLED TUI falls back to `_http._tcp` and probes each candidate with `/json/info` to confirm it is a WLED device.
+```
+No devices yet. Press 's' to scan.
+```
+
+## Device discovery (manual)
+Discovery is user-initiated only. Press `s` to scan for WLED devices using `avahi-browse`. If no `_wled._tcp` services are found, WLED TUI falls back to `_http._tcp` and probes each candidate with `/json/info` to confirm it is a WLED device.
+
+## Cached state
+WLED TUI keeps a persistent cache in `~/.cache/wledtui/devices.json` (`XDG_CACHE_HOME` respected). The cache stores device hostname/IP and the last valid `/json/state` payload per device. Cached state is used for immediate UI rendering and remains visible while background refreshes are in flight. Devices that are offline or stale remain listed with their last known state; they are not auto-deleted.
 
 ## Requirements / Dependencies
-- Bash 5+
+- `bash`
 - `curl`
 - `jq`
-- `avahi-browse` + `avahi-daemon` (required for discovery)
-- A terminal that supports standard ANSI escape sequences (works over SSH)
+- `avahi-browse`
 
 ## Install
 Keep it short—install the dependencies with your distro’s package manager:
@@ -68,7 +72,7 @@ Use the same key labels as the footer legend:
 | (←/→) | Adjust values (brightness, speed/intensity, RGB channel, transition) |
 | (enter) | Apply/toggle (power, preset, effect, palette, segment, nightlight) |
 | (r) | Refresh selected device |
-| (s) | Scan (Bonjour) |
+| (s) | Scan for WLED devices |
 | (a) | Add device (host:port) |
 | (d) | Delete device |
 | (e) | Edit device (host:port) |
@@ -81,12 +85,11 @@ Use the same key labels as the footer legend:
 | (?) | Toggle help overlay |
 
 ## Configuration / Files
-- `~/.config/wledtui/devices.json` — cached devices (uses `XDG_CONFIG_HOME` if set).
+- `~/.cache/wledtui/devices.json` — cached devices and last known state (uses `XDG_CACHE_HOME` if set).
 - `~/.cache/wledtui/debug.log` — debug logs when `WLEDTUI_DEBUG=1` (uses `XDG_CACHE_HOME` if set).
 
 ## Troubleshooting
 - **Discovery finds nothing**:
-  - Confirm `avahi-daemon` is running.
   - Ensure `avahi-browse` is installed and in `$PATH`.
   - Check firewall rules for UDP 5353 multicast.
   - If devices are on another VLAN/subnet, enable an mDNS reflector or move devices to the same L2 segment.
@@ -99,4 +102,3 @@ Use the same key labels as the footer legend:
 ## Limitations
 - Discovery relies on Avahi; without it, devices must be added manually.
 - Only the WLED JSON HTTP API is supported (`/json/state`, `/json/info`, `/json/effects`, `/json/palettes`, `/presets.json`/`/json/presets`).
-
