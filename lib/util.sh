@@ -5,7 +5,9 @@ IFS=$'\n\t'
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wledtui"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/wledtui"
-CACHE_FILE="$CONFIG_DIR/devices.json"
+CONFIG_FILE="$CONFIG_DIR/devices.json"
+CACHE_FILE="$CACHE_DIR/devices.json"
+CACHE_LOCK="$CACHE_DIR/devices.lock"
 DEBUG_LOG_FILE="$CACHE_DIR/debug.log"
 
 log_debug() {
