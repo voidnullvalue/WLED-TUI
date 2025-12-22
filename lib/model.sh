@@ -15,6 +15,13 @@ declare -A DEV_PORT=()
 declare -A DEV_ONLINE=()
 declare -A DEV_LAST_SEEN=()
 declare -A DEV_BRI=()
+declare -A DEV_UI_BRI=()
+declare -A DEV_PENDING_BRI=()
+declare -A DEV_PENDING_DUE_MS=()
+declare -A DEV_BRI_INFLIGHT_PID=()
+declare -A DEV_BRI_INFLIGHT_VAL=()
+declare -A DEV_LAST_BRI_SEND_MS=()
+declare -A DEV_LAST_BRI_INPUT_MS=()
 declare -A DEV_ON=()
 declare -A DEV_PRESET=()
 declare -A DEV_VER=()
@@ -57,6 +64,13 @@ model_add_device() {
   DEV_ONLINE[$id]="0"
   DEV_LAST_SEEN[$id]="0"
   DEV_BRI[$id]="0"
+  DEV_UI_BRI[$id]="0"
+  DEV_PENDING_BRI[$id]=""
+  DEV_PENDING_DUE_MS[$id]="0"
+  DEV_BRI_INFLIGHT_PID[$id]=""
+  DEV_BRI_INFLIGHT_VAL[$id]=""
+  DEV_LAST_BRI_SEND_MS[$id]="0"
+  DEV_LAST_BRI_INPUT_MS[$id]="0"
   DEV_ON[$id]="0"
   DEV_PRESET[$id]="0"
   DEV_VER[$id]=""
@@ -83,7 +97,9 @@ model_remove_device() {
   done
   DEVICE_IDS=("${new_ids[@]}")
   unset DEV_NAME[$id] DEV_ALIAS[$id] DEV_WLED_NAME[$id] DEV_HOST[$id] DEV_PORT[$id] DEV_ONLINE[$id] DEV_LAST_SEEN[$id]
-  unset DEV_BRI[$id] DEV_ON[$id] DEV_PRESET[$id] DEV_VER[$id] DEV_WIFI[$id]
+  unset DEV_BRI[$id] DEV_UI_BRI[$id] DEV_PENDING_BRI[$id] DEV_PENDING_DUE_MS[$id]
+  unset DEV_BRI_INFLIGHT_PID[$id] DEV_BRI_INFLIGHT_VAL[$id] DEV_LAST_BRI_SEND_MS[$id] DEV_LAST_BRI_INPUT_MS[$id]
+  unset DEV_ON[$id] DEV_PRESET[$id] DEV_VER[$id] DEV_WIFI[$id]
   unset DEV_UPTIME[$id] DEV_STATE_JSON[$id] DEV_INFO_JSON[$id] DEV_INFO_TS[$id]
   unset DEV_NEXT_POLL[$id] DEV_BACKOFF[$id]
   unset DEV_TRANSITION[$id] DEV_NL_ON[$id] DEV_NL_DUR[$id] DEV_LIVE[$id]

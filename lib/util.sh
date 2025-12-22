@@ -19,6 +19,20 @@ now_ts() {
   date +%s
 }
 
+now_ms() {
+  date +%s%3N
+}
+
+sleep_ms() {
+  local ms=$1
+  if [[ -z "$ms" || "$ms" == "0" ]]; then
+    return
+  fi
+  local seconds
+  seconds=$(awk -v ms="$ms" 'BEGIN {printf "%.3f", ms/1000}')
+  sleep "$seconds"
+}
+
 ensure_config_dir() {
   mkdir -p "$CONFIG_DIR"
 }
