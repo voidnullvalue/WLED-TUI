@@ -17,6 +17,39 @@ log_debug() {
   fi
 }
 
+strip_ansi() {
+  # Security: strip ANSI escape sequences so untrusted text cannot emit terminal control codes.
+  printf '%s' "$1" | sed -E 's/\x1B\[[0-9;?]*[ -/]*[@-~]//g; s/\x1B\][^\a]*\a//g; s/\x1B[@-Z\\-_]//g'
+}
+
+sanitize_for_display() {
+  # Security: remove control characters and ANSI escapes to prevent terminal injection.
+  local text
+  text=$(strip_ansi "$1")
+  text=$(printf '%s' "$text" | tr -d '\000-\010\013\014\016-\037\177')
+  text=${text//$'\n'/ }
+  text=${text//$'\t'/ }
+  printf '%s' "$text"
+}
+
+is_valid_host() {
+  local host=$1
+  # Security: allow only hostname/IP-safe characters to prevent URL/argument injection.
+  [[ -n "$host" && "$host" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+is_valid_port() {
+  local port=$1
+  # Security: require numeric TCP port ranges to prevent URL/argument injection.
+  [[ "$port" =~ ^[0-9]{1,5}$ ]] && (( port >= 1 && port <= 65535 ))
+}
+
+write_file() {
+  # Security: avoid shell evaluation when writing cached JSON.
+  local content=$1 path=$2
+  printf '%s\n' "$content" > "$path"
+}
+
 now_ts() {
   date +%s
 }
@@ -78,7 +111,8 @@ color_support() {
 }
 
 set_term_title() {
-  printf '\033]0;%s\007' "$1"
+  # Security: sanitize title to prevent terminal control injection.
+  printf '\033]0;%s\007' "$(sanitize_for_display "$1")"
 }
 
 with_lock() {
@@ -150,7 +184,8 @@ prompt_input() {
   local input
   tput cnorm
   stty echo
-  printf '%s' "$prompt"
+  # Security: sanitize prompts to keep untrusted labels inert.
+  printf '%s' "$(sanitize_for_display "$prompt")"
   IFS= read -r input
   stty -echo
   tput civis
@@ -162,7 +197,8 @@ confirm_prompt() {
   local reply
   tput cnorm
   stty echo
-  printf '%s [y/N]: ' "$prompt"
+  # Security: sanitize prompts to keep untrusted labels inert.
+  printf '%s [y/N]: ' "$(sanitize_for_display "$prompt")"
   IFS= read -r reply
   stty -echo
   tput civis

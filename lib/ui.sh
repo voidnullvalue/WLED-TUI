@@ -38,6 +38,8 @@ ui_clear() {
 
 ui_trim_text() {
   local text=$1 width=$2
+  # Security: sanitize untrusted text before rendering to avoid terminal escape injection.
+  text=$(sanitize_for_display "$text")
   if (( ${#text} > width )); then
     text=${text:0:width}
   fi
