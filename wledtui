@@ -35,6 +35,10 @@ SEG_APPLY_ALL=0
 PRESETS_LOCK="$CONFIG_DIR/presets.lock"
 MODEL_BUSY=0
 INFO_REFRESH_TTL=300
+BRI_STEP=5
+BRI_DEBOUNCE_MS=${WLEDTUI_BRI_DEBOUNCE_MS:-40}
+BRI_MIN_SEND_INTERVAL_MS=${WLEDTUI_BRI_MIN_SEND_INTERVAL_MS:-40}
+BRI_ACTIVE_WINDOW_MS=${WLEDTUI_BRI_ACTIVE_WINDOW_MS:-300}
 
 LAST_REFRESH_SELECTED=0
 LAST_POLL_SELECTED=0
@@ -263,6 +267,7 @@ update_device_state() {
       mapfile -t SEGMENTS < <(jq -c '.seg[]?' <<<"$normalized")
       update_segment_texts
     fi
+    sync_ui_brightness_from_device "$id"
     changed=1
   fi
   if (( changed )); then
@@ -339,6 +344,137 @@ refresh_all_devices() {
       fi
     fi
   done
+}
+
+brightness_adjust_active() {
+  local id=$1 now_ms=$2
+  if [[ -n "${DEV_PENDING_BRI[$id]:-}" ]]; then
+    return 0
+  fi
+  if [[ -n "${DEV_BRI_INFLIGHT_PID[$id]:-}" ]]; then
+    return 0
+  fi
+  local last=${DEV_LAST_BRI_INPUT_MS[$id]:-0}
+  if (( now_ms - last <= BRI_ACTIVE_WINDOW_MS )); then
+    return 0
+  fi
+  return 1
+}
+
+device_display_brightness() {
+  local id=$1
+  local bri=${DEV_UI_BRI[$id]:-}
+  if [[ -z "$bri" ]]; then
+    bri=${DEV_BRI[$id]:-0}
+  fi
+  printf '%s' "$bri"
+}
+
+brightness_pending_marker() {
+  local id=$1
+  local ui=${DEV_UI_BRI[$id]:-}
+  local dev=${DEV_BRI[$id]:-0}
+  if [[ -n "${DEV_PENDING_BRI[$id]:-}" || -n "${DEV_BRI_INFLIGHT_PID[$id]:-}" ]]; then
+    printf '*'
+    return
+  fi
+  if [[ -n "$ui" && "$ui" != "$dev" ]]; then
+    printf '*'
+  fi
+}
+
+sync_ui_brightness_from_device() {
+  local id=$1
+  local now
+  now=$(now_ms)
+  if brightness_adjust_active "$id" "$now"; then
+    return
+  fi
+  local dev=${DEV_BRI[$id]:-0}
+  if [[ "${DEV_UI_BRI[$id]:-}" != "$dev" ]]; then
+    DEV_UI_BRI[$id]="$dev"
+    DEVICE_LIST_DIRTY=1
+  fi
+}
+
+queue_brightness_update() {
+  local id=$1 bri=$2
+  local now
+  now=$(now_ms)
+  DEV_UI_BRI[$id]="$bri"
+  DEV_PENDING_BRI[$id]="$bri"
+  DEV_PENDING_DUE_MS[$id]=$((now + BRI_DEBOUNCE_MS))
+  DEV_LAST_BRI_INPUT_MS[$id]="$now"
+  DEVICE_LIST_DIRTY=1
+}
+
+start_brightness_send() {
+  local id=$1 bri=$2
+  local url payload delay_ms
+  url="$(api_base_url "$id")/json/state"
+  payload="{\"bri\":$bri}"
+  delay_ms=${WLEDTUI_NET_DELAY_MS:-0}
+  if [[ "${WLEDTUI_ASYNC_DRY_RUN:-}" == "1" ]]; then
+    (
+      sleep_ms "$delay_ms"
+    ) &
+  else
+    (
+      sleep_ms "$delay_ms"
+      curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
+        --silent --show-error --fail \
+        -H 'Content-Type: application/json' -X POST \
+        --data-binary "$payload" "$url" >/dev/null 2>&1
+    ) &
+  fi
+  DEV_BRI_INFLIGHT_PID[$id]=$!
+  DEV_BRI_INFLIGHT_VAL[$id]="$bri"
+}
+
+process_brightness_queue() {
+  local now
+  now=$(now_ms)
+  local dirty=0
+  local id
+  for id in "${DEVICE_IDS[@]}"; do
+    local pid=${DEV_BRI_INFLIGHT_PID[$id]:-}
+    if [[ -n "$pid" ]]; then
+      if kill -0 "$pid" 2>/dev/null; then
+        continue
+      fi
+      wait "$pid" 2>/dev/null || true
+      DEV_BRI_INFLIGHT_PID[$id]=""
+      DEV_BRI_INFLIGHT_VAL[$id]=""
+      dirty=1
+    fi
+    local pending=${DEV_PENDING_BRI[$id]:-}
+    [[ -z "$pending" ]] && continue
+    if [[ "${DEV_ONLINE[$id]:-0}" != "1" ]]; then
+      log_debug "brightness drop offline device=$id desired=$pending"
+      DEV_PENDING_BRI[$id]=""
+      DEV_PENDING_DUE_MS[$id]="0"
+      dirty=1
+      continue
+    fi
+    local due=${DEV_PENDING_DUE_MS[$id]:-0}
+    local last_send=${DEV_LAST_BRI_SEND_MS[$id]:-0}
+    local earliest=$((last_send + BRI_MIN_SEND_INTERVAL_MS))
+    if (( due < earliest )); then
+      due=$earliest
+      DEV_PENDING_DUE_MS[$id]="$due"
+    fi
+    if (( now < due )); then
+      continue
+    fi
+    start_brightness_send "$id" "$pending"
+    DEV_PENDING_BRI[$id]=""
+    DEV_PENDING_DUE_MS[$id]="0"
+    DEV_LAST_BRI_SEND_MS[$id]="$now"
+  done
+  if (( dirty )); then
+    DEVICE_LIST_DIRTY=1
+    UI_DIRTY=1
+  fi
 }
 
 apply_state_payload() {
@@ -431,14 +567,16 @@ rebuild_device_cache() {
     id=${DEVICE_IDS[$i]}
     name=$(device_display_name "$id")
     status=${DEV_ONLINE[$id]:-0}
-    bri=${DEV_BRI[$id]:-0}
+    bri=$(device_display_brightness "$id")
+    local pending
+    pending=$(brightness_pending_marker "$id")
     preset=${DEV_PRESET[$id]:-0}
     on=${DEV_ON[$id]:-false}
     marker="off"
     if [[ "$on" == "true" ]]; then
       marker="on"
     fi
-    line="${name:0:16} ${marker} bri:${bri} ps:${preset}"
+    line="${name:0:16} ${marker} bri:${bri}${pending} ps:${preset}"
     LEFT_ROW_NORMAL[$i]=$(ui_format_list_item "$line" "$LEFT_INNER_WIDTH" 0 $(( status == 0 )))
     LEFT_ROW_SELECTED[$i]=$(ui_format_list_item "$line" "$LEFT_INNER_WIDTH" 1 0)
   done
@@ -735,14 +873,17 @@ build_status_lines() {
   local wifi=${DEV_WIFI[$id]}
   local uptime=${DEV_UPTIME[$id]}
   local on=${DEV_ON[$id]}
-  local bri=${DEV_BRI[$id]}
+  local bri
+  bri=$(device_display_brightness "$id")
+  local pending
+  pending=$(brightness_pending_marker "$id")
   local preset=${DEV_PRESET[$id]}
   set_right_line 0 "$width" "Device: $name"
   set_right_line 1 "$width" "Version: $ver"
   set_right_line 2 "$width" "WiFi signal: $wifi"
   set_right_line 3 "$width" "Uptime: $uptime"
   set_right_line 5 "$width" "Power: $on (Enter toggles)"
-  set_right_line 6 "$width" "Brightness: $bri (Left/Right)"
+  set_right_line 6 "$width" "Brightness: $bri${pending} (Left/Right)"
   set_right_line 7 "$width" "Preset: $preset"
   if (( LAST_REFRESH_SELECTED > 0 )); then
     set_right_line 9 "$width" "Last refresh: $LAST_REFRESH_SELECTED"
@@ -1323,13 +1464,11 @@ handle_left() {
   [[ -z "$id" ]] && return
   case "$TAB_INDEX" in
     0)
-      local bri=${DEV_BRI[$id]:-0}
-      bri=$((bri-5))
+      local bri
+      bri=$(device_display_brightness "$id")
+      bri=$((bri-BRI_STEP))
       bri=$(clamp "$bri" 0 255)
-      local payload
-      payload=$(jq -n --argjson bri "$bri" '{bri:$bri}')
-      apply_state_payload "$id" "$payload"
-      DEV_BRI[$id]="$bri"
+      queue_brightness_update "$id" "$bri"
       ;;
     5)
       local state=${DEV_STATE_JSON[$id]}
@@ -1398,13 +1537,11 @@ handle_right() {
   [[ -z "$id" ]] && return
   case "$TAB_INDEX" in
     0)
-      local bri=${DEV_BRI[$id]:-0}
-      bri=$((bri+5))
+      local bri
+      bri=$(device_display_brightness "$id")
+      bri=$((bri+BRI_STEP))
       bri=$(clamp "$bri" 0 255)
-      local payload
-      payload=$(jq -n --argjson bri "$bri" '{bri:$bri}')
-      apply_state_payload "$id" "$payload"
-      DEV_BRI[$id]="$bri"
+      queue_brightness_update "$id" "$bri"
       ;;
     5)
       local state=${DEV_STATE_JSON[$id]}
@@ -1642,6 +1779,59 @@ handle_reboot() {
   fi
 }
 
+smoke_test_brightness_repeat() {
+  local id=$1
+  local old_debounce=$BRI_DEBOUNCE_MS
+  local old_min_interval=$BRI_MIN_SEND_INTERVAL_MS
+  local old_dry=${WLEDTUI_ASYNC_DRY_RUN:-}
+  local old_delay=${WLEDTUI_NET_DELAY_MS:-}
+  BRI_DEBOUNCE_MS=0
+  BRI_MIN_SEND_INTERVAL_MS=0
+  export WLEDTUI_ASYNC_DRY_RUN=1
+  export WLEDTUI_NET_DELAY_MS="${WLEDTUI_NET_DELAY_MS:-200}"
+  DEV_ONLINE[$id]="1"
+  DEV_UI_BRI[$id]="${DEV_BRI[$id]:-0}"
+  local start_ms end_ms elapsed i
+  start_ms=$(now_ms)
+  for ((i=0; i<80; i++)); do
+    queue_brightness_update "$id" "$(( (i * BRI_STEP) % 256 ))"
+    process_brightness_queue
+  done
+  end_ms=$(now_ms)
+  elapsed=$((end_ms - start_ms))
+  if (( elapsed > 500 )); then
+    printf 'Brightness repeat loop took %sms (expected < 500ms)\n' "$elapsed" >&2
+    BRI_DEBOUNCE_MS=$old_debounce
+    BRI_MIN_SEND_INTERVAL_MS=$old_min_interval
+    if [[ -z "$old_dry" ]]; then
+      unset WLEDTUI_ASYNC_DRY_RUN
+    else
+      export WLEDTUI_ASYNC_DRY_RUN="$old_dry"
+    fi
+    if [[ -z "$old_delay" ]]; then
+      unset WLEDTUI_NET_DELAY_MS
+    else
+      export WLEDTUI_NET_DELAY_MS="$old_delay"
+    fi
+    return 1
+  fi
+  sleep_ms 250
+  process_brightness_queue
+  BRI_DEBOUNCE_MS=$old_debounce
+  BRI_MIN_SEND_INTERVAL_MS=$old_min_interval
+  if [[ -z "$old_dry" ]]; then
+    unset WLEDTUI_ASYNC_DRY_RUN
+  else
+    export WLEDTUI_ASYNC_DRY_RUN="$old_dry"
+  fi
+  if [[ -z "$old_delay" ]]; then
+    unset WLEDTUI_NET_DELAY_MS
+  else
+    export WLEDTUI_NET_DELAY_MS="$old_delay"
+  fi
+  printf 'Brightness repeat loop: %sms\n' "$elapsed"
+}
+
 smoke_test() {
   local target=$1
   if [[ -z "$target" ]]; then
@@ -1690,6 +1880,10 @@ smoke_test() {
     return 1
   fi
   printf 'Brightness after set: %s\n' "$(jq -r '.bri // 0' <<<"$state")"
+  if ! smoke_test_brightness_repeat "$id"; then
+    printf 'Brightness repeat smoke test failed\n' >&2
+    return 1
+  fi
 
   local presets
   presets=$(api_get_presets "$id" || true)
@@ -1724,6 +1918,7 @@ main_loop() {
   while true; do
     local now
     now=$(now_ts)
+    process_brightness_queue
     if (( MODEL_BUSY == 0 && now - LAST_POLL_ALL >= 8 )); then
       refresh_all_devices
       LAST_POLL_ALL=$now
