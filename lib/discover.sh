@@ -75,7 +75,10 @@ discover_devices() {
   while IFS= read -r entry; do
     [[ -z "$entry" ]] && continue
     IFS='|' read -r name host port <<<"$entry"
-    model_add_device "$name" "$host" "$port"
+    # Security: only add devices with validated host/port values.
+    if ! model_add_device "$name" "$host" "$port"; then
+      continue
+    fi
     local id
     id=$(device_id "$host" "$port")
     DEV_LAST_SEEN[$id]="$now"

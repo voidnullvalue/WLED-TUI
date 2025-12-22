@@ -60,6 +60,11 @@ device_id() {
 model_add_device() {
   local name=$1 host=$2 port=$3 ip=${4:-}
   local id
+  # Security: reject unsafe host/port values from user, cache, or network discovery.
+  if ! is_valid_host "$host" || ! is_valid_port "$port"; then
+    log_debug "Rejected device with unsafe host/port host=${host} port=${port}"
+    return 1
+  fi
   id=$(device_id "$host" "$port")
   local existing_alias=${DEV_ALIAS[$id]:-}
   local existing_wled=${DEV_WLED_NAME[$id]:-}
@@ -182,11 +187,19 @@ model_load_devices() {
     host=$(jq -r '.host' <<<"$dev")
     ip=$(jq -r '.ip // ""' <<<"$dev")
     port=$(jq -r '.port' <<<"$dev")
+    # Security: skip cached entries with unsafe host/port values.
+    if ! is_valid_host "$host" || ! is_valid_port "$port"; then
+      log_debug "Skipping cached device with unsafe host/port host=${host} port=${port}"
+      continue
+    fi
     last_seen=$(jq -r '.last_seen // 0' <<<"$dev")
     state=$(jq -c '.state // empty' <<<"$dev" 2>/dev/null || true)
     state_ts=$(jq -r '.state_ts // 0' <<<"$dev" 2>/dev/null || printf '0')
     id=$(device_id "$host" "$port")
-    model_add_device "$name" "$host" "$port" "$ip"
+    # Security: ensure only validated devices are loaded into memory.
+    if ! model_add_device "$name" "$host" "$port" "$ip"; then
+      continue
+    fi
     DEV_ALIAS[$id]="$alias"
     DEV_WLED_NAME[$id]="$wled_name"
     DEV_LAST_SEEN[$id]="$last_seen"
@@ -235,5 +248,6 @@ model_save_devices() {
         '.devices += [{name:$name,mdns_name:$name,alias:$alias,wled_name:$wled_name,host:$host,ip:$ip,port:($port|tonumber),last_seen:$last_seen,state:null,state_ts:$state_ts}]' <<<"$json")
     fi
   done
-  with_lock "$CACHE_LOCK" sh -c 'printf "%s\n" "$1" > "$2"' -- "$json" "$CACHE_FILE"
+  # Security: write cache without invoking a shell.
+  with_lock "$CACHE_LOCK" write_file "$json" "$CACHE_FILE"
 }

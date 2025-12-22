@@ -19,17 +19,19 @@ api_request() {
   url="$(api_base_url "$id")$path"
   local response exit_code
   if [[ "$method" == "GET" ]]; then
+    # Security: use -- to terminate curl options so URL data cannot inject flags.
     if response=$(curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
-      --silent --show-error --fail "$url" 2>&1); then
+      --silent --show-error --fail -- "$url" 2>&1); then
       exit_code=0
     else
       exit_code=$?
     fi
   else
+    # Security: use -- to terminate curl options so URL data cannot inject flags.
     if response=$(curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
       --silent --show-error --fail \
       -H 'Content-Type: application/json' -X "$method" \
-      --data-binary "$payload" "$url" 2>&1); then
+      --data-binary "$payload" -- "$url" 2>&1); then
       exit_code=0
     else
       exit_code=$?
@@ -84,10 +86,14 @@ api_get_presets() {
 
 api_probe_wled() {
   local host=$1 port=$2
+  # Security: validate host/port before constructing URLs for curl.
+  if ! is_valid_host "$host" || ! is_valid_port "$port"; then
+    return 1
+  fi
   local url="http://$host:$port/json/info"
   local info
   info=$(curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
-    --silent --show-error --fail "$url" 2>/dev/null || true)
+    --silent --show-error --fail -- "$url" 2>/dev/null || true)
   if [[ -z "$info" ]]; then
     return 1
   fi

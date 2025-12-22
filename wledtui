@@ -287,8 +287,9 @@ start_get_request() {
   (
     sleep_ms "$delay_ms"
     local exit_code=0
+    # Security: use -- to terminate curl options so URL data cannot inject flags.
     if curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
-      --silent --show-error --fail "$url" -o "$tmp" 2>/dev/null; then
+      --silent --show-error --fail -- "$url" -o "$tmp" 2>/dev/null; then
       mv "$tmp" "$outfile"
     else
       exit_code=$?
@@ -313,10 +314,11 @@ start_patch_send() {
   else
     (
       sleep_ms "$delay_ms"
+      # Security: use -- to terminate curl options so URL data cannot inject flags.
       curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
         --silent --show-error --fail \
         -H 'Content-Type: application/json' -X POST \
-        --data-binary "$payload" "$url" >/dev/null 2>&1
+        --data-binary "$payload" -- "$url" >/dev/null 2>&1
     ) &
   fi
   printf '%s' "$!"
@@ -2235,7 +2237,11 @@ handle_add_device() {
   local host port
   IFS=':' read -r host port <<<"$input"
   port=${port:-80}
-  model_add_device "$host" "$host" "$port"
+  # Security: validate user-provided host/port before adding.
+  if ! model_add_device "$host" "$host" "$port"; then
+    FULL_REDRAW=1
+    return
+  fi
   DEVICE_LIST_DIRTY=1
   model_save_devices
   FULL_REDRAW=1
@@ -2269,11 +2275,20 @@ handle_edit_device() {
   local host port
   IFS=':' read -r host port <<<"$input"
   port=${port:-80}
+  # Security: validate user-provided host/port before replacing existing device.
+  if ! is_valid_host "$host" || ! is_valid_port "$port"; then
+    FULL_REDRAW=1
+    return
+  fi
   local name="${DEV_NAME[$id]}"
   local alias="${DEV_ALIAS[$id]:-}"
   local wled_name="${DEV_WLED_NAME[$id]:-}"
   model_remove_device "$id"
-  model_add_device "$name" "$host" "$port"
+  # Security: validate user-provided host/port before adding.
+  if ! model_add_device "$name" "$host" "$port"; then
+    FULL_REDRAW=1
+    return
+  fi
   DEVICE_LIST_DIRTY=1
   local new_id
   new_id=$(device_id "$host" "$port")
