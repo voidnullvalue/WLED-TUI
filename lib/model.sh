@@ -48,6 +48,8 @@ declare -A DEV_LIVE=()
 declare -A DEV_PRESETS_JSON=()
 declare -A DEV_EFFECTS_JSON=()
 declare -A DEV_PALETTES_JSON=()
+declare -A DEV_STATE_TS=()
+declare -A DEV_STATE_STALE=()
 
 device_id() {
   local host=$1 port=$2
@@ -111,6 +113,8 @@ model_add_device() {
   DEV_PRESETS_JSON[$id]=""
   DEV_EFFECTS_JSON[$id]=""
   DEV_PALETTES_JSON[$id]=""
+  DEV_STATE_TS[$id]="0"
+  DEV_STATE_STALE[$id]="0"
 }
 
 model_remove_device() {
@@ -134,6 +138,7 @@ model_remove_device() {
   unset DEV_NEXT_POLL[$id] DEV_BACKOFF[$id]
   unset DEV_TRANSITION[$id] DEV_NL_ON[$id] DEV_NL_DUR[$id] DEV_LIVE[$id]
   unset DEV_PRESETS_JSON[$id] DEV_EFFECTS_JSON[$id] DEV_PALETTES_JSON[$id]
+  unset DEV_STATE_TS[$id] DEV_STATE_STALE[$id]
 }
 
 device_display_name() {
@@ -157,38 +162,95 @@ device_display_name() {
 }
 
 model_load_devices() {
-  ensure_config_dir
+  ensure_cache_dir
   if [[ ! -f "$CACHE_FILE" ]]; then
     return
   fi
   jq -c '.devices[]?' "$CACHE_FILE" 2>/dev/null | while IFS= read -r dev; do
-    local name host port last_seen id alias wled_name
+    local name host port last_seen id alias wled_name state state_ts info info_ts info_name
     name=$(jq -r '.mdns_name // .name // ""' <<<"$dev")
     alias=$(jq -r '.alias // ""' <<<"$dev")
     wled_name=$(jq -r '.wled_name // ""' <<<"$dev")
     host=$(jq -r '.host' <<<"$dev")
     port=$(jq -r '.port' <<<"$dev")
     last_seen=$(jq -r '.last_seen // 0' <<<"$dev")
+    state=$(jq -c '.state // empty' <<<"$dev" 2>/dev/null || true)
+    state_ts=$(jq -r '.state_ts // 0' <<<"$dev" 2>/dev/null || printf '0')
+    info=$(jq -c '.info // empty' <<<"$dev" 2>/dev/null || true)
+    info_ts=$(jq -r '.info_ts // 0' <<<"$dev" 2>/dev/null || printf '0')
+    info_name=$(jq -r '.name // empty' <<<"$info" 2>/dev/null || true)
     id=$(device_id "$host" "$port")
     model_add_device "$name" "$host" "$port"
     DEV_ALIAS[$id]="$alias"
-    DEV_WLED_NAME[$id]="$wled_name"
+    if [[ -n "$info_name" ]]; then
+      DEV_WLED_NAME[$id]="$info_name"
+    else
+      DEV_WLED_NAME[$id]="$wled_name"
+    fi
     DEV_LAST_SEEN[$id]="$last_seen"
+    DEV_STATE_TS[$id]="$state_ts"
+    DEV_INFO_TS[$id]="$info_ts"
+    if [[ -n "$info" ]] && jq -e '.' <<<"$info" >/dev/null 2>&1; then
+      DEV_INFO_JSON[$id]="$info"
+      DEV_VER[$id]=$(jq -r '.ver // ""' <<<"$info")
+      DEV_WIFI[$id]=$(jq -r '.wifi.signal // ""' <<<"$info")
+      DEV_UPTIME[$id]=$(jq -r '.uptime // ""' <<<"$info")
+    fi
+    if [[ -n "$state" ]] && jq -e '.' <<<"$state" >/dev/null 2>&1; then
+      DEV_STATE_JSON[$id]="$state"
+      DEV_BRI[$id]=$(jq -r '.bri // 0' <<<"$state")
+      DEV_ON[$id]=$(jq -r '.on // false' <<<"$state")
+      DEV_PRESET[$id]=$(jq -r '.ps // 0' <<<"$state")
+      DEV_TRANSITION[$id]=$(jq -r '.transition // 0' <<<"$state")
+      DEV_NL_ON[$id]=$(jq -r '.nl.on // false' <<<"$state")
+      DEV_NL_DUR[$id]=$(jq -r '.nl.dur // 0' <<<"$state")
+      DEV_LIVE[$id]=$(jq -r '.live // false' <<<"$state")
+      DEV_STATE_STALE[$id]="1"
+    fi
   done
 }
 
 model_save_devices() {
-  ensure_config_dir
+  ensure_cache_dir
   local json
   json=$(jq -n '{devices: []}')
   for id in "${DEVICE_IDS[@]}"; do
-    json=$(jq -c --arg name "${DEV_NAME[$id]}" \
-      --arg alias "${DEV_ALIAS[$id]:-}" \
-      --arg wled_name "${DEV_WLED_NAME[$id]:-}" \
-      --arg host "${DEV_HOST[$id]}" \
-      --arg port "${DEV_PORT[$id]}" \
-      --argjson last_seen "${DEV_LAST_SEEN[$id]}" \
-      '.devices += [{name:$name,mdns_name:$name,alias:$alias,wled_name:$wled_name,host:$host,port:($port|tonumber),last_seen:$last_seen}]' <<<"$json")
+    local state_json="${DEV_STATE_JSON[$id]:-}"
+    local state_ts="${DEV_STATE_TS[$id]:-0}"
+    local info_json="${DEV_INFO_JSON[$id]:-}"
+    local info_ts="${DEV_INFO_TS[$id]:-0}"
+    local info_arg state_arg
+    if [[ -n "$info_json" ]] && jq -e '.' <<<"$info_json" >/dev/null 2>&1; then
+      info_arg="--argjson info"
+    else
+      info_json="null"
+      info_arg="--argjson info"
+    fi
+    if [[ -n "$state_json" ]] && jq -e '.' <<<"$state_json" >/dev/null 2>&1; then
+      state_arg="--argjson state"
+      json=$(jq -c --arg name "${DEV_NAME[$id]}" \
+        --arg alias "${DEV_ALIAS[$id]:-}" \
+        --arg wled_name "${DEV_WLED_NAME[$id]:-}" \
+        --arg host "${DEV_HOST[$id]}" \
+        --arg port "${DEV_PORT[$id]}" \
+        --argjson last_seen "${DEV_LAST_SEEN[$id]}" \
+        $state_arg "$state_json" \
+        --argjson state_ts "$state_ts" \
+        $info_arg "$info_json" \
+        --argjson info_ts "$info_ts" \
+        '.devices += [{name:$name,mdns_name:$name,alias:$alias,wled_name:$wled_name,host:$host,port:($port|tonumber),last_seen:$last_seen,state:$state,state_ts:$state_ts,info:$info,info_ts:$info_ts}]' <<<"$json")
+    else
+      json=$(jq -c --arg name "${DEV_NAME[$id]}" \
+        --arg alias "${DEV_ALIAS[$id]:-}" \
+        --arg wled_name "${DEV_WLED_NAME[$id]:-}" \
+        --arg host "${DEV_HOST[$id]}" \
+        --arg port "${DEV_PORT[$id]}" \
+        --argjson last_seen "${DEV_LAST_SEEN[$id]}" \
+        --argjson state_ts "$state_ts" \
+        $info_arg "$info_json" \
+        --argjson info_ts "$info_ts" \
+        '.devices += [{name:$name,mdns_name:$name,alias:$alias,wled_name:$wled_name,host:$host,port:($port|tonumber),last_seen:$last_seen,state:null,state_ts:$state_ts,info:$info,info_ts:$info_ts}]' <<<"$json")
+    fi
   done
-  printf '%s\n' "$json" > "$CACHE_FILE"
+  with_lock "$CACHE_LOCK" sh -c 'printf "%s\n" "$1" > "$2"' -- "$json" "$CACHE_FILE"
 }

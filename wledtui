@@ -54,7 +54,7 @@ KEYBINDINGS=(
   "Global|Tab|Tab|Next tab"
   "Global|Shift-Tab|ESC[Z/ESC[1;2Z]|Previous tab"
   "Global|r|r|Refresh selected device"
-  "Global|s|s|Scan (Bonjour)"
+  "Global|s|s|Scan for devices"
   "Global|l|l|Toggle live mode"
   "Global|b|b|Reboot device"
   "Devices|a|a|Add device"
@@ -439,10 +439,16 @@ apply_state_response() {
     DEVICE_LIST_DIRTY=1
     changed=1
   fi
+  if [[ "${DEV_STATE_STALE[$id]:-0}" != "0" ]]; then
+    DEV_STATE_STALE[$id]="0"
+    DEVICE_LIST_DIRTY=1
+    changed=1
+  fi
   DEV_BACKOFF[$id]="2"
   DEV_NEXT_POLL[$id]="$(( $(now_ts) + 2 ))"
   local normalized
   normalized=$(jq -cS '.' <<<"$state")
+  DEV_STATE_TS[$id]=$(now_ts)
   if [[ "${DEV_STATE_JSON[$id]:-}" != "$normalized" ]]; then
     DEV_STATE_JSON[$id]="$normalized"
     DEV_BRI[$id]=$(jq -r '.bri // 0' <<<"$normalized")
@@ -469,6 +475,7 @@ apply_state_response() {
   if (( changed )); then
     MODEL_DIRTY=1
   fi
+  model_save_devices
 }
 
 apply_state_failure() {
@@ -476,6 +483,11 @@ apply_state_failure() {
   local changed=0
   if [[ "${DEV_ONLINE[$id]:-0}" != "0" ]]; then
     DEV_ONLINE[$id]="0"
+    DEVICE_LIST_DIRTY=1
+    changed=1
+  fi
+  if [[ -n "${DEV_STATE_JSON[$id]:-}" && "${DEV_STATE_STALE[$id]:-0}" != "1" ]]; then
+    DEV_STATE_STALE[$id]="1"
     DEVICE_LIST_DIRTY=1
     changed=1
   fi
@@ -503,10 +515,10 @@ apply_info_response() {
   wled_name=$(jq -r '.name // ""' <<<"$normalized")
   if [[ -n "$wled_name" && "${DEV_WLED_NAME[$id]:-}" != "$wled_name" ]]; then
     DEV_WLED_NAME[$id]="$wled_name"
-    model_save_devices
   fi
   DEV_INFO_TS[$id]=$(now_ts)
   MODEL_DIRTY=1
+  model_save_devices
 }
 
 schedule_state_fetch() {
@@ -631,11 +643,13 @@ process_get_result() {
       else
         local state
         state=$(cat "$data_file" 2>/dev/null || true)
-        if [[ -n "$state" ]]; then
+        if [[ -n "$state" ]] && jq -e '.' <<<"$state" >/dev/null 2>&1; then
           apply_state_response "$id" "$state"
           if [[ "$id" == "$(current_device_id)" ]]; then
             LAST_REFRESH_SELECTED=$(now_ts)
           fi
+        else
+          apply_state_failure "$id"
         fi
       fi
       ;;
@@ -643,7 +657,9 @@ process_get_result() {
       if [[ "$exit_code" == "0" && -f "$data_file" ]]; then
         local info
         info=$(cat "$data_file" 2>/dev/null || true)
-        [[ -n "$info" ]] && apply_info_response "$id" "$info"
+        if [[ -n "$info" ]] && jq -e '.' <<<"$info" >/dev/null 2>&1; then
+          apply_info_response "$id" "$info"
+        fi
       fi
       ;;
     presets)
@@ -796,6 +812,20 @@ current_device_id() {
   printf '%s' "${DEVICE_IDS[$SELECTED_DEVICE_INDEX]}"
 }
 
+load_cached_device_view() {
+  local id=$1
+  [[ -z "$id" ]] && return
+  SEGMENTS=()
+  if [[ -n "${DEV_STATE_JSON[$id]:-}" ]]; then
+    mapfile -t SEGMENTS < <(jq -c '.seg[]?' <<<"${DEV_STATE_JSON[$id]}" 2>/dev/null || true)
+    update_segment_texts
+    LAST_REFRESH_SELECTED=${DEV_STATE_TS[$id]:-0}
+  else
+    SEGMENTS_CACHE_DIRTY=1
+    LAST_REFRESH_SELECTED=0
+  fi
+}
+
 box_top_line() {
   local width=$1 title=$2
   local inner=$((width-2))
@@ -860,7 +890,7 @@ update_segment_texts() {
 rebuild_device_cache() {
   LEFT_ROW_NORMAL=()
   LEFT_ROW_SELECTED=()
-  local i id name status bri preset on marker line
+  local i id name status bri preset on marker line stale_label
   for i in "${!DEVICE_IDS[@]}"; do
     id=${DEVICE_IDS[$i]}
     name=$(device_display_name "$id")
@@ -874,7 +904,11 @@ rebuild_device_cache() {
     if [[ "$on" == "true" ]]; then
       marker="on"
     fi
-    line="${name:0:16} ${marker} bri:${bri}${pending} ps:${preset}"
+    stale_label=""
+    if [[ "${DEV_STATE_STALE[$id]:-0}" == "1" ]]; then
+      stale_label=" stale"
+    fi
+    line="${name:0:16} ${marker} bri:${bri}${pending} ps:${preset}${stale_label}"
     LEFT_ROW_NORMAL[$i]=$(ui_format_list_item "$line" "$LEFT_INNER_WIDTH" 0 $(( status == 0 )))
     LEFT_ROW_SELECTED[$i]=$(ui_format_list_item "$line" "$LEFT_INNER_WIDTH" 1 0)
   done
@@ -1127,7 +1161,7 @@ update_right_list_selection() {
 refresh_status_pane() {
   local id=$1
   build_status_lines "$id" "$RIGHT_INNER_WIDTH"
-  local rows=(0 1 2 3 5 6 7 9)
+  local rows=(0 1 2 3 4 5 6 7 9)
   local row
   for row in "${rows[@]}"; do
     if (( row >= 0 && row < FRAME_INNER_ROWS )); then
@@ -1170,6 +1204,8 @@ build_status_lines() {
   local ver=${DEV_VER[$id]}
   local wifi=${DEV_WIFI[$id]}
   local uptime=${DEV_UPTIME[$id]}
+  local state_ts=${DEV_STATE_TS[$id]:-0}
+  local state_stale=${DEV_STATE_STALE[$id]:-0}
   local on
   on=$(device_display_on "$id")
   local bri
@@ -1182,6 +1218,15 @@ build_status_lines() {
   set_right_line 1 "$width" "Version: $ver"
   set_right_line 2 "$width" "WiFi signal: $wifi"
   set_right_line 3 "$width" "Uptime: $uptime"
+  if (( state_ts > 0 )); then
+    if (( state_stale )); then
+      set_right_line 4 "$width" "State: stale (cached at $state_ts)"
+    else
+      set_right_line 4 "$width" "State cached at: $state_ts"
+    fi
+  else
+    set_right_line 4 "$width" "State: unavailable"
+  fi
   set_right_line 5 "$width" "Power: $on (Enter toggles)"
   set_right_line 6 "$width" "Brightness: $bri${pending} (Left/Right)"
   set_right_line 7 "$width" "Preset: $preset"
@@ -1419,6 +1464,9 @@ build_frame() {
       fi
     fi
   done
+  if (( ${#DEVICE_IDS[@]} == 0 )); then
+    LEFT_LINES[0]=$(ui_pad_text "No devices yet. Press 's' to scan." "$LEFT_INNER_WIDTH")
+  fi
 
   if [[ -n "$id" ]]; then
     case "$TAB_INDEX" in
@@ -1505,6 +1553,8 @@ build_frame() {
         build_advanced_lines "$id" "$RIGHT_INNER_WIDTH"
         ;;
     esac
+  elif (( ${#DEVICE_IDS[@]} == 0 )); then
+    RIGHT_LINES[0]=$(ui_pad_text "No devices yet. Press 's' to scan." "$RIGHT_INNER_WIDTH")
   fi
 
   if (( rows > 2 )); then
@@ -1627,6 +1677,7 @@ handle_key() {
         local id
         id=$(current_device_id)
         if [[ -n "$id" ]]; then
+          load_cached_device_view "$id"
           case "$TAB_INDEX" in
             0) refresh_status_pane "$id" ;;
             5) refresh_advanced_pane "$id" ;;
@@ -1643,6 +1694,7 @@ handle_key() {
         local id
         id=$(current_device_id)
         if [[ -n "$id" ]]; then
+          load_cached_device_view "$id"
           case "$TAB_INDEX" in
             0) refresh_status_pane "$id" ;;
             5) refresh_advanced_pane "$id" ;;
@@ -1705,6 +1757,7 @@ handle_up() {
         local id
         id=$(current_device_id)
         if [[ -n "$id" ]]; then
+          load_cached_device_view "$id"
           case "$TAB_INDEX" in
             0) refresh_status_pane "$id" ;;
             5) refresh_advanced_pane "$id" ;;
@@ -1753,6 +1806,7 @@ handle_down() {
         local id
         id=$(current_device_id)
         if [[ -n "$id" ]]; then
+          load_cached_device_view "$id"
           case "$TAB_INDEX" in
             0) refresh_status_pane "$id" ;;
             5) refresh_advanced_pane "$id" ;;
@@ -2225,8 +2279,19 @@ smoke_test() {
 
 main_loop() {
   model_load_devices
-  discover_devices
-  model_save_devices
+  if (( ${#DEVICE_IDS[@]} > 0 )); then
+    local id
+    for id in "${DEVICE_IDS[@]}"; do
+      if [[ -n "${DEV_STATE_JSON[$id]:-}" ]]; then
+        sync_desired_from_known "$id"
+      fi
+    done
+    local selected_id
+    selected_id=$(current_device_id)
+    if [[ -n "$selected_id" ]]; then
+      load_cached_device_view "$selected_id"
+    fi
+  fi
   DEVICE_LIST_DIRTY=1
   ui_init
   set_term_title "$APP_NAME"
