@@ -12,6 +12,7 @@ declare -A DEV_WLED_NAME=()
 declare -A DEV_INFO_TS=()
 declare -A DEV_HOST=()
 declare -A DEV_PORT=()
+declare -A DEV_IP=()
 declare -A DEV_ONLINE=()
 declare -A DEV_LAST_SEEN=()
 declare -A DEV_BRI=()
@@ -57,13 +58,14 @@ device_id() {
 }
 
 model_add_device() {
-  local name=$1 host=$2 port=$3
+  local name=$1 host=$2 port=$3 ip=${4:-}
   local id
   id=$(device_id "$host" "$port")
   local existing_alias=${DEV_ALIAS[$id]:-}
   local existing_wled=${DEV_WLED_NAME[$id]:-}
   local existing_name=${DEV_NAME[$id]:-}
   local existing_info_ts=${DEV_INFO_TS[$id]:-0}
+  local existing_ip=${DEV_IP[$id]:-}
   if [[ -z "${DEV_HOST[$id]:-}" ]]; then
     DEVICE_IDS+=("$id")
   fi
@@ -76,6 +78,11 @@ model_add_device() {
   DEV_WLED_NAME[$id]="$existing_wled"
   DEV_HOST[$id]="$host"
   DEV_PORT[$id]="$port"
+  if [[ -n "$ip" ]]; then
+    DEV_IP[$id]="$ip"
+  else
+    DEV_IP[$id]="$existing_ip"
+  fi
   DEV_ONLINE[$id]="0"
   DEV_LAST_SEEN[$id]="0"
   DEV_BRI[$id]="0"
@@ -127,6 +134,7 @@ model_remove_device() {
   done
   DEVICE_IDS=("${new_ids[@]}")
   unset DEV_NAME[$id] DEV_ALIAS[$id] DEV_WLED_NAME[$id] DEV_HOST[$id] DEV_PORT[$id] DEV_ONLINE[$id] DEV_LAST_SEEN[$id]
+  unset DEV_IP[$id]
   unset DEV_BRI[$id] DEV_UI_BRI[$id] DEV_DESIRED_BRI[$id] DEV_DESIRED_ON[$id] DEV_DESIRED_PRESET[$id]
   unset DEV_DESIRED_TRANSITION[$id] DEV_DESIRED_NL_ON[$id] DEV_DESIRED_LIVE[$id]
   unset DEV_PENDING_PATCH[$id] DEV_PATCH_DUE_MS[$id] DEV_PATCH_INFLIGHT_PID[$id] DEV_PATCH_LAST_SEND_MS[$id]
@@ -167,17 +175,18 @@ model_load_devices() {
     return
   fi
   jq -c '.devices[]?' "$CACHE_FILE" 2>/dev/null | while IFS= read -r dev; do
-    local name host port last_seen id alias wled_name state state_ts
+    local name host port ip last_seen id alias wled_name state state_ts
     name=$(jq -r '.mdns_name // .name // ""' <<<"$dev")
     alias=$(jq -r '.alias // ""' <<<"$dev")
     wled_name=$(jq -r '.wled_name // ""' <<<"$dev")
     host=$(jq -r '.host' <<<"$dev")
+    ip=$(jq -r '.ip // ""' <<<"$dev")
     port=$(jq -r '.port' <<<"$dev")
     last_seen=$(jq -r '.last_seen // 0' <<<"$dev")
     state=$(jq -c '.state // empty' <<<"$dev" 2>/dev/null || true)
     state_ts=$(jq -r '.state_ts // 0' <<<"$dev" 2>/dev/null || printf '0')
     id=$(device_id "$host" "$port")
-    model_add_device "$name" "$host" "$port"
+    model_add_device "$name" "$host" "$port" "$ip"
     DEV_ALIAS[$id]="$alias"
     DEV_WLED_NAME[$id]="$wled_name"
     DEV_LAST_SEEN[$id]="$last_seen"
@@ -208,20 +217,22 @@ model_save_devices() {
         --arg alias "${DEV_ALIAS[$id]:-}" \
         --arg wled_name "${DEV_WLED_NAME[$id]:-}" \
         --arg host "${DEV_HOST[$id]}" \
+        --arg ip "${DEV_IP[$id]:-}" \
         --arg port "${DEV_PORT[$id]}" \
         --argjson last_seen "${DEV_LAST_SEEN[$id]}" \
         --argjson state "$state_json" \
         --argjson state_ts "$state_ts" \
-        '.devices += [{name:$name,mdns_name:$name,alias:$alias,wled_name:$wled_name,host:$host,port:($port|tonumber),last_seen:$last_seen,state:$state,state_ts:$state_ts}]' <<<"$json")
+        '.devices += [{name:$name,mdns_name:$name,alias:$alias,wled_name:$wled_name,host:$host,ip:$ip,port:($port|tonumber),last_seen:$last_seen,state:$state,state_ts:$state_ts}]' <<<"$json")
     else
       json=$(jq -c --arg name "${DEV_NAME[$id]}" \
         --arg alias "${DEV_ALIAS[$id]:-}" \
         --arg wled_name "${DEV_WLED_NAME[$id]:-}" \
         --arg host "${DEV_HOST[$id]}" \
+        --arg ip "${DEV_IP[$id]:-}" \
         --arg port "${DEV_PORT[$id]}" \
         --argjson last_seen "${DEV_LAST_SEEN[$id]}" \
         --argjson state_ts "$state_ts" \
-        '.devices += [{name:$name,mdns_name:$name,alias:$alias,wled_name:$wled_name,host:$host,port:($port|tonumber),last_seen:$last_seen,state:null,state_ts:$state_ts}]' <<<"$json")
+        '.devices += [{name:$name,mdns_name:$name,alias:$alias,wled_name:$wled_name,host:$host,ip:$ip,port:($port|tonumber),last_seen:$last_seen,state:null,state_ts:$state_ts}]' <<<"$json")
     fi
   done
   with_lock "$CACHE_LOCK" sh -c 'printf "%s\n" "$1" > "$2"' -- "$json" "$CACHE_FILE"
