@@ -129,18 +129,20 @@ with_lock() {
 }
 
 parse_presets_tsv() {
+  # Adapted to preserve preset logic from 63c9ce9
   jq -r '
     if type == "object" then
       to_entries
       | map(select(.value != null))
-      | map({id:(.key|tostring), sort:(.key|tonumber? // 9999999999), name:(.value.n // ("Preset " + .key))})
-      | sort_by(.sort, .id)
+      | map({id:(.key|tonumber?), name:(.value.n // ("Preset " + .key))})
+      | map(select(.id != null))
+      | sort_by(.id)
       | .[]
       | "\(.id)\t\(.name)"
     elif type == "array" then
       to_entries
       | map(select(.value != null))
-      | map({id:(.key|tostring), name:(.value|tostring)})
+      | map({id:(.key|tonumber), name:(.value|tostring)})
       | .[]
       | "\(.id)\t\(.name)"
     else empty end
