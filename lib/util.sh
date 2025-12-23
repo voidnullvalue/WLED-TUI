@@ -133,15 +133,14 @@ parse_presets_tsv() {
     if type == "object" then
       to_entries
       | map(select(.value != null))
-      | map({id:(.key|tonumber?), name:(.value.n // ("Preset " + .key))})
-      | map(select(.id != null))
-      | sort_by(.id)
+      | map({id:(.key|tostring), sort:(.key|tonumber? // 9999999999), name:(.value.n // ("Preset " + .key))})
+      | sort_by(.sort, .id)
       | .[]
       | "\(.id)\t\(.name)"
     elif type == "array" then
       to_entries
       | map(select(.value != null))
-      | map({id:(.key|tonumber), name:(.value|tostring)})
+      | map({id:(.key|tostring), name:(.value|tostring)})
       | .[]
       | "\(.id)\t\(.name)"
     else empty end

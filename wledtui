@@ -301,6 +301,38 @@ start_get_request() {
   printf '%s' "$!"
 }
 
+start_presets_request() {
+  local id=$1
+  ensure_net_spool_dir
+  local base url outfile statusfile tmp delay_ms
+  base="$(api_base_url "$id")"
+  outfile=$(net_data_path "$id" "presets")
+  statusfile=$(net_status_path "$id" "presets")
+  local events_file
+  events_file=$(net_events_path)
+  tmp="${outfile}.tmp.$$"
+  delay_ms=${WLEDTUI_NET_DELAY_MS:-0}
+  (
+    sleep_ms "$delay_ms"
+    local exit_code=0
+    # Regression fix: async presets fetch dropped /presets.json fallback; keep non-blocking with inline fallback.
+    # Security: use -- to terminate curl options so URL data cannot inject flags.
+    if curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
+      --silent --show-error --fail -- "${base}/presets.json" -o "$tmp" 2>/dev/null; then
+      mv "$tmp" "$outfile"
+    elif curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
+      --silent --show-error --fail -- "${base}/json/presets" -o "$tmp" 2>/dev/null; then
+      mv "$tmp" "$outfile"
+    else
+      exit_code=$?
+      rm -f "$tmp"
+    fi
+    printf '%s %s\n' "$exit_code" "$(now_ts)" > "$statusfile"
+    printf '%s\t%s\n' "$id" "presets" >> "$events_file"
+  ) &
+  printf '%s' "$!"
+}
+
 start_patch_send() {
   local id=$1 payload=$2
   ensure_net_spool_dir
@@ -558,7 +590,7 @@ schedule_presets_fetch() {
   if [[ -n "${DEV_GET_PRESETS_INFLIGHT_PID[$id]:-}" ]]; then
     return
   fi
-  DEV_GET_PRESETS_INFLIGHT_PID[$id]=$(start_get_request "$id" "presets" "/json/presets")
+  DEV_GET_PRESETS_INFLIGHT_PID[$id]=$(start_presets_request "$id")
 }
 
 schedule_effects_fetch() {
@@ -2155,7 +2187,11 @@ handle_enter() {
       preset_id=$(with_lock "$PRESETS_LOCK" get_selected_preset_id)
       if [[ -n "$preset_id" ]]; then
         DEV_DESIRED_PRESET[$id]="$preset_id"
-        enqueue_patch "$id" "$(jq -n --argjson ps "$preset_id" '{ps:$ps}')"
+        if [[ "$preset_id" =~ ^-?[0-9]+$ ]]; then
+          enqueue_patch "$id" "$(jq -n --argjson ps "$preset_id" '{ps:$ps}')"
+        else
+          enqueue_patch "$id" "$(jq -n --arg ps "$preset_id" '{ps:$ps}')"
+        fi
         DEVICE_LIST_DIRTY=1
       fi
       ;;
@@ -2438,7 +2474,11 @@ smoke_test() {
     first_line=$(parse_presets_tsv <<<"$presets" 2>/dev/null | head -n1 || true)
     preset_id=$(awk -F'\t' '{print $1}' <<<"$first_line")
     if [[ -n "$preset_id" ]]; then
-      payload=$(jq -n --argjson ps "$preset_id" '{ps:$ps}')
+      if [[ "$preset_id" =~ ^-?[0-9]+$ ]]; then
+        payload=$(jq -n --argjson ps "$preset_id" '{ps:$ps}')
+      else
+        payload=$(jq -n --arg ps "$preset_id" '{ps:$ps}')
+      fi
       if ! api_set_state "$id" "$payload" >/dev/null; then
         printf 'Failed to apply preset %s on %s\n' "$preset_id" "$target" >&2
         return 1
