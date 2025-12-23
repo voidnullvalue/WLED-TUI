@@ -77,9 +77,9 @@ api_get_palettes() {
 api_get_presets() {
   local id=$1
   local presets
-  presets=$(api_request GET "$id" '/presets.json' || true)
+  presets=$(api_request GET "$id" '/json/presets' || true)
   if [[ -z "$presets" ]]; then
-    presets=$(api_request GET "$id" '/json/presets' || true)
+    presets=$(api_request GET "$id" '/presets.json' || true)
   fi
   printf '%s' "$presets"
 }

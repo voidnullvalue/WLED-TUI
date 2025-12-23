@@ -33,9 +33,12 @@ UI_SPINNER_FRAMES=("|" "/" "-" "\\")
 UI_SPINNER_INDEX=0
 UI_SPINNER_LAST_MS=0
 UI_SPINNER_INTERVAL_MS=120
+PRESETS_FETCH_CYCLE=0
 
 PRESETS_IDS=()
 PRESETS_NAMES=()
+PRESETS_DEVICE_ID=""
+PRESETS_LOADING=0
 EFFECTS=()
 PALETTES=()
 SEGMENTS=()
@@ -179,20 +182,34 @@ adjust_preset_index() {
 fetch_presets() {
   local id=$1
   ensure_config_dir
+  PRESETS_DEVICE_ID="$id"
+  PRESETS_LOADING=1
   with_lock "$PRESETS_LOCK" fetch_presets_locked "$id"
   schedule_presets_fetch "$id"
 }
 
 fetch_presets_locked() {
   local id=$1
-  PRESETS_IDS=()
-  PRESETS_NAMES=()
   local data="${DEV_PRESETS_JSON[$id]:-}"
   if [[ -z "$data" ]]; then
-    PRESET_INDEX=0
-    SELECTED_PRESET_ID=""
+    # DEBUG (temporary): preset pipeline instrumentation for cache state.
+    log_debug "presets_cache_empty id=${id} cycle=${DEV_PRESETS_FETCH_CYCLE[$id]:-0}"
+    if [[ "$PRESETS_DEVICE_ID" == "$id" ]]; then
+      PRESETS_IDS=()
+      PRESETS_NAMES=()
+      PRESET_INDEX=0
+      SELECTED_PRESET_ID=""
+      PRESETS_CACHE_DIRTY=1
+    fi
     return
   fi
+  local keys
+  keys=$(jq -r 'if type == "object" then keys[] elif type == "array" then (range(0; length) | tostring) else empty end' \
+    <<<"$data" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+  # DEBUG (temporary): preset pipeline instrumentation for parsed keys.
+  log_debug "presets_parse_keys id=${id} cycle=${DEV_PRESETS_FETCH_CYCLE[$id]:-0} keys=${keys}"
+  PRESETS_IDS=()
+  PRESETS_NAMES=()
   local desired_id="${SELECTED_PRESET_ID:-}"
   if [[ -z "$desired_id" || "$desired_id" == "0" ]]; then
     desired_id="${DEV_DESIRED_PRESET[$id]:-${DEV_PRESET[$id]:-0}}"
@@ -207,6 +224,10 @@ fetch_presets_locked() {
     PRESETS_IDS+=("$pid")
     PRESETS_NAMES+=("$pname")
   done
+  PRESETS_DEVICE_ID="$id"
+  PRESETS_LOADING=0
+  # DEBUG (temporary): preset pipeline instrumentation after validation.
+  log_debug "presets_validated id=${id} cycle=${DEV_PRESETS_FETCH_CYCLE[$id]:-0} count=${#PRESETS_IDS[@]} ids=${PRESETS_IDS[*]-}"
   sync_preset_index "$SELECTED_PRESET_ID"
   PRESETS_CACHE_DIRTY=1
 }
@@ -297,6 +318,45 @@ start_get_request() {
     fi
     printf '%s %s\n' "$exit_code" "$(now_ts)" > "$statusfile"
     printf '%s\t%s\n' "$id" "$type" >> "$events_file"
+  ) &
+  printf '%s' "$!"
+}
+
+start_presets_request() {
+  local id=$1
+  ensure_net_spool_dir
+  local base url outfile statusfile tmp delay_ms cycle
+  base="$(api_base_url "$id")"
+  outfile=$(net_data_path "$id" "presets")
+  statusfile=$(net_status_path "$id" "presets")
+  local events_file
+  events_file=$(net_events_path)
+  tmp="${outfile}.tmp.$$"
+  delay_ms=${WLEDTUI_NET_DELAY_MS:-0}
+  cycle="${DEV_PRESETS_FETCH_CYCLE[$id]:-0}"
+  (
+    sleep_ms "$delay_ms"
+    local exit_code=0
+    # Regression fix: async presets fetch dropped /presets.json fallback; keep non-blocking with inline fallback.
+    # Security: use -- to terminate curl options so URL data cannot inject flags.
+    if curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
+      --silent --show-error --fail -- "${base}/json/presets" -o "$tmp" 2>/dev/null; then
+      # DEBUG (temporary): preset pipeline instrumentation for fetch content.
+      log_debug "presets_fetch id=${id} cycle=${cycle} endpoint=/json/presets bytes=$(wc -c < "$tmp") head=$(head -c 200 "$tmp")"
+      mv "$tmp" "$outfile"
+    elif curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
+      --silent --show-error --fail -- "${base}/presets.json" -o "$tmp" 2>/dev/null; then
+      # DEBUG (temporary): preset pipeline instrumentation for fetch content.
+      log_debug "presets_fetch id=${id} cycle=${cycle} endpoint=/presets.json bytes=$(wc -c < "$tmp") head=$(head -c 200 "$tmp")"
+      mv "$tmp" "$outfile"
+    else
+      exit_code=$?
+      # DEBUG (temporary): preset pipeline instrumentation for fetch failures.
+      log_debug "presets_fetch id=${id} cycle=${cycle} endpoint=failed exit=${exit_code}"
+      rm -f "$tmp"
+    fi
+    printf '%s %s\n' "$exit_code" "$(now_ts)" > "$statusfile"
+    printf '%s\t%s\n' "$id" "presets" >> "$events_file"
   ) &
   printf '%s' "$!"
 }
@@ -558,7 +618,13 @@ schedule_presets_fetch() {
   if [[ -n "${DEV_GET_PRESETS_INFLIGHT_PID[$id]:-}" ]]; then
     return
   fi
-  DEV_GET_PRESETS_INFLIGHT_PID[$id]=$(start_get_request "$id" "presets" "/json/presets")
+  PRESETS_FETCH_CYCLE=$((PRESETS_FETCH_CYCLE + 1))
+  DEV_PRESETS_FETCH_CYCLE[$id]="$PRESETS_FETCH_CYCLE"
+  if [[ "$id" == "$PRESETS_DEVICE_ID" || "$id" == "$(current_device_id)" ]]; then
+    PRESETS_LOADING=1
+  fi
+  DEV_GET_PRESETS_INFLIGHT_PID[$id]=$(start_presets_request "$id")
+  log_debug "presets_schedule id=${id} cycle=${DEV_PRESETS_FETCH_CYCLE[$id]}"
 }
 
 schedule_effects_fetch() {
@@ -685,10 +751,20 @@ process_get_result() {
     presets)
       if [[ "$exit_code" == "0" && -f "$data_file" ]]; then
         DEV_PRESETS_JSON[$id]=$(cat "$data_file" 2>/dev/null || true)
+        if [[ "$id" == "$PRESETS_DEVICE_ID" ]]; then
+          PRESETS_LOADING=0
+        fi
+        # DEBUG (temporary): preset pipeline instrumentation after assignment.
+        log_debug "presets_assign id=${id} cycle=${DEV_PRESETS_FETCH_CYCLE[$id]:-0} bytes=$(wc -c < "$data_file")"
         if [[ "$id" == "$(current_device_id)" && "$TAB_INDEX" == "1" ]]; then
           with_lock "$PRESETS_LOCK" fetch_presets_locked "$id"
           UI_DIRTY=1
         fi
+      else
+        if [[ "$id" == "$PRESETS_DEVICE_ID" ]]; then
+          PRESETS_LOADING=0
+        fi
+        log_debug "presets_fetch_failed id=${id} cycle=${DEV_PRESETS_FETCH_CYCLE[$id]:-0} exit=${exit_code}"
       fi
       ;;
     effects)
@@ -808,6 +884,7 @@ process_discover_results() {
       DEV_LAST_SEEN[$id]="$now"
       schedule_state_fetch "$id"
       schedule_info_fetch "$id"
+      schedule_presets_fetch "$id"
     done < "$outfile"
     DEVICE_LIST_DIRTY=1
     UI_DIRTY=1
@@ -1267,7 +1344,11 @@ build_status_lines() {
 build_presets_lines_locked() {
   local width=$1
   if [[ ${#PRESETS_IDS[@]} -eq 0 ]]; then
-    set_right_line 0 "$width" "No presets loaded."
+    if (( PRESETS_LOADING )); then
+      set_right_line 0 "$width" "Presets loading..."
+    else
+      set_right_line 0 "$width" "No presets found."
+    fi
     return
   fi
   local i row=0
@@ -1278,6 +1359,9 @@ build_presets_lines_locked() {
     set_right_list_line "$row" "$width" "$line" $(( i == PRESET_INDEX )) 0
     row=$((row+1))
   done
+  if (( row + 1 < FRAME_INNER_ROWS )); then
+    set_right_line "$row" "$width" "Presets available (${#PRESETS_IDS[@]})"
+  fi
 }
 
 build_presets_lines() {
@@ -1410,6 +1494,7 @@ begin_busy_refresh() {
   UI_SPINNER_LAST_MS=$(now_ms)
   schedule_state_fetch "$id"
   schedule_info_fetch "$id"
+  schedule_presets_fetch "$id"
   UI_DIRTY=1
 }
 
@@ -1637,8 +1722,14 @@ build_frame() {
         build_status_lines "$id" "$RIGHT_INNER_WIDTH"
         ;;
       1)
+        # DEBUG (temporary): preset pipeline instrumentation at render time.
+        log_debug "presets_render id=${id} cycle=${DEV_PRESETS_FETCH_CYCLE[$id]:-0} count=${#PRESETS_IDS[@]} loading=${PRESETS_LOADING}"
         if (( ${#PRESETS_IDS[@]} == 0 )); then
-          RIGHT_LINES[0]=$(ui_pad_text "No presets loaded." "$RIGHT_INNER_WIDTH")
+          if (( PRESETS_LOADING )); then
+            RIGHT_LINES[0]=$(ui_pad_text "Presets loading..." "$RIGHT_INNER_WIDTH")
+          else
+            RIGHT_LINES[0]=$(ui_pad_text "No presets found." "$RIGHT_INNER_WIDTH")
+          fi
         else
           for ((i=0; i<FRAME_INNER_ROWS; i++)); do
             if (( i < ${#PRESETS_IDS[@]} )); then
@@ -1649,6 +1740,10 @@ build_frame() {
               fi
             fi
           done
+          if (( ${#PRESETS_IDS[@]} + 1 < FRAME_INNER_ROWS )); then
+            local status_row=${#PRESETS_IDS[@]}
+            RIGHT_LINES[$status_row]=$(ui_pad_text "Presets available (${#PRESETS_IDS[@]})" "$RIGHT_INNER_WIDTH")
+          fi
         fi
         ;;
       2)
@@ -2155,7 +2250,11 @@ handle_enter() {
       preset_id=$(with_lock "$PRESETS_LOCK" get_selected_preset_id)
       if [[ -n "$preset_id" ]]; then
         DEV_DESIRED_PRESET[$id]="$preset_id"
-        enqueue_patch "$id" "$(jq -n --argjson ps "$preset_id" '{ps:$ps}')"
+        if [[ "$preset_id" =~ ^-?[0-9]+$ ]]; then
+          enqueue_patch "$id" "$(jq -n --argjson ps "$preset_id" '{ps:$ps}')"
+        else
+          enqueue_patch "$id" "$(jq -n --arg ps "$preset_id" '{ps:$ps}')"
+        fi
         DEVICE_LIST_DIRTY=1
       fi
       ;;
@@ -2438,7 +2537,11 @@ smoke_test() {
     first_line=$(parse_presets_tsv <<<"$presets" 2>/dev/null | head -n1 || true)
     preset_id=$(awk -F'\t' '{print $1}' <<<"$first_line")
     if [[ -n "$preset_id" ]]; then
-      payload=$(jq -n --argjson ps "$preset_id" '{ps:$ps}')
+      if [[ "$preset_id" =~ ^-?[0-9]+$ ]]; then
+        payload=$(jq -n --argjson ps "$preset_id" '{ps:$ps}')
+      else
+        payload=$(jq -n --arg ps "$preset_id" '{ps:$ps}')
+      fi
       if ! api_set_state "$id" "$payload" >/dev/null; then
         printf 'Failed to apply preset %s on %s\n' "$preset_id" "$target" >&2
         return 1
