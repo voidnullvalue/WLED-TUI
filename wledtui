@@ -768,7 +768,7 @@ process_get_result() {
       fi
       ;;
   esac
-  if (( request_failed && UI_BUSY_REFRESH )) && [[ "$id" == "$UI_BUSY_REFRESH_ID" ]] && [[ "$type" == "state" || "$type" == "info" ]]; then
+  if (( request_failed && UI_BUSY_REFRESH )) && [[ "$id" == "$UI_BUSY_REFRESH_ID" ]] && [[ "$type" == "state" ]]; then
     UI_BUSY_REFRESH_ERROR=1
   fi
   local pid
@@ -1493,8 +1493,8 @@ update_busy_states() {
   if (( UI_BUSY_REFRESH )); then
     local id=$UI_BUSY_REFRESH_ID
     local state_pid=${DEV_GET_STATE_INFLIGHT_PID[$id]:-}
-    local info_pid=${DEV_GET_INFO_INFLIGHT_PID[$id]:-}
-    if [[ -z "$state_pid" && -z "$info_pid" ]]; then
+    if [[ -z "$state_pid" ]]; then
+      # Fix: refresh failure caused by async preset fetch
       UI_BUSY_REFRESH=0
       UI_BUSY_REFRESH_ID=""
       if (( UI_BUSY_REFRESH_ERROR )); then
