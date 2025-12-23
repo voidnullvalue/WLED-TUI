@@ -47,6 +47,7 @@ declare -A DEV_NL_ON=()
 declare -A DEV_NL_DUR=()
 declare -A DEV_LIVE=()
 declare -A DEV_PRESETS_JSON=()
+declare -A DEV_PRESETS_CYCLE=()
 declare -A DEV_EFFECTS_JSON=()
 declare -A DEV_PALETTES_JSON=()
 declare -A DEV_STATE_TS=()
@@ -123,6 +124,7 @@ model_add_device() {
   DEV_NL_DUR[$id]="0"
   DEV_LIVE[$id]="false"
   DEV_PRESETS_JSON[$id]=""
+  DEV_PRESETS_CYCLE[$id]="0"
   DEV_EFFECTS_JSON[$id]=""
   DEV_PALETTES_JSON[$id]=""
   DEV_STATE_TS[$id]="0"
@@ -151,6 +153,7 @@ model_remove_device() {
   unset DEV_NEXT_POLL[$id] DEV_BACKOFF[$id]
   unset DEV_TRANSITION[$id] DEV_NL_ON[$id] DEV_NL_DUR[$id] DEV_LIVE[$id]
   unset DEV_PRESETS_JSON[$id] DEV_EFFECTS_JSON[$id] DEV_PALETTES_JSON[$id]
+  unset DEV_PRESETS_CYCLE[$id]
   unset DEV_STATE_TS[$id] DEV_STATE_STALE[$id]
 }
 

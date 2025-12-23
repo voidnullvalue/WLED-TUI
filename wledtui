@@ -54,6 +54,7 @@ BRI_STEP=5
 PATCH_DEBOUNCE_MS=${WLEDTUI_PATCH_DEBOUNCE_MS:-50}
 PATCH_MIN_SEND_INTERVAL_MS=${WLEDTUI_PATCH_MIN_SEND_INTERVAL_MS:-50}
 UI_ACTIVE_WINDOW_MS=${WLEDTUI_ACTIVE_WINDOW_MS:-400}
+PRESETS_REFRESH_SEQ=0
 
 LAST_REFRESH_SELECTED=0
 FRAME_INNER_ROWS=0
@@ -189,6 +190,7 @@ fetch_presets_locked() {
   PRESETS_NAMES=()
   local data="${DEV_PRESETS_JSON[$id]:-}"
   if [[ -z "$data" ]]; then
+    preset_debug_log "$id" "cache_empty" "presets_json=empty"
     PRESET_INDEX=0
     SELECTED_PRESET_ID=""
     return
@@ -201,13 +203,17 @@ fetch_presets_locked() {
   local lines=()
   mapfile -t lines < <(parse_presets_tsv <<<"$data" 2>/dev/null || true)
   local line pid pname
+  local parsed_ids=()
   for line in "${lines[@]}"; do
     IFS=$'\t' read -r pid pname <<<"$line"
     [[ -z "$pid" ]] && continue
     PRESETS_IDS+=("$pid")
     PRESETS_NAMES+=("$pname")
+    parsed_ids+=("$pid")
   done
+  preset_debug_log "$id" "parsed" "keys=$(IFS=,; printf '%s' "${parsed_ids[*]}")"
   sync_preset_index "$SELECTED_PRESET_ID"
+  preset_debug_log "$id" "validated" "count=${#PRESETS_IDS[@]}"
   PRESETS_CACHE_DIRTY=1
 }
 
@@ -273,6 +279,15 @@ net_status_path() {
   printf '%s/net/%s.%s.status' "$CACHE_DIR" "$key" "$type"
 }
 
+preset_debug_log() {
+  local id=$1 stage=$2 message=$3
+  local cycle=${DEV_PRESETS_CYCLE[$id]:-0}
+  local device_label
+  device_label=$(device_display_name "$id")
+  # DEBUG_PRESETS_REMOVE: temporary instrumentation for preset pipeline.
+  log_debug "DEBUG_PRESETS_REMOVE device=${device_label} id=${id} cycle=${cycle} stage=${stage} ${message}"
+}
+
 start_get_request() {
   local id=$1 type=$2 path=$3
   ensure_net_spool_dir
@@ -318,10 +333,10 @@ start_presets_request() {
     # Regression fix: async presets fetch dropped /presets.json fallback; keep non-blocking with inline fallback.
     # Security: use -- to terminate curl options so URL data cannot inject flags.
     if curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
-      --silent --show-error --fail -- "${base}/presets.json" -o "$tmp" 2>/dev/null; then
+      --silent --show-error --fail -- "${base}/json/presets" -o "$tmp" 2>/dev/null; then
       mv "$tmp" "$outfile"
     elif curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
-      --silent --show-error --fail -- "${base}/json/presets" -o "$tmp" 2>/dev/null; then
+      --silent --show-error --fail -- "${base}/presets.json" -o "$tmp" 2>/dev/null; then
       mv "$tmp" "$outfile"
     else
       exit_code=$?
@@ -590,6 +605,9 @@ schedule_presets_fetch() {
   if [[ -n "${DEV_GET_PRESETS_INFLIGHT_PID[$id]:-}" ]]; then
     return
   fi
+  PRESETS_REFRESH_SEQ=$((PRESETS_REFRESH_SEQ + 1))
+  DEV_PRESETS_CYCLE[$id]="$PRESETS_REFRESH_SEQ"
+  preset_debug_log "$id" "schedule" "request=presets"
   DEV_GET_PRESETS_INFLIGHT_PID[$id]=$(start_presets_request "$id")
 }
 
@@ -716,11 +734,19 @@ process_get_result() {
       ;;
     presets)
       if [[ "$exit_code" == "0" && -f "$data_file" ]]; then
+        local raw_size raw_snippet
+        raw_size=$(wc -c < "$data_file" | tr -d ' ')
+        raw_snippet=$(head -c 200 "$data_file" 2>/dev/null || true)
+        raw_snippet=$(sanitize_for_display "$raw_snippet")
+        preset_debug_log "$id" "http_response" "size=${raw_size} snippet=${raw_snippet}"
         DEV_PRESETS_JSON[$id]=$(cat "$data_file" 2>/dev/null || true)
+        preset_debug_log "$id" "state_assign" "var=DEV_PRESETS_JSON size=${raw_size}"
         if [[ "$id" == "$(current_device_id)" && "$TAB_INDEX" == "1" ]]; then
           with_lock "$PRESETS_LOCK" fetch_presets_locked "$id"
           UI_DIRTY=1
         fi
+      else
+        preset_debug_log "$id" "http_error" "exit=${exit_code}"
       fi
       ;;
     effects)
@@ -840,6 +866,7 @@ process_discover_results() {
       DEV_LAST_SEEN[$id]="$now"
       schedule_state_fetch "$id"
       schedule_info_fetch "$id"
+      schedule_presets_fetch "$id"
     done < "$outfile"
     DEVICE_LIST_DIRTY=1
     UI_DIRTY=1
@@ -1297,9 +1324,14 @@ build_status_lines() {
 }
 
 build_presets_lines_locked() {
-  local width=$1
+  local id=$1 width=$2
   if [[ ${#PRESETS_IDS[@]} -eq 0 ]]; then
-    set_right_line 0 "$width" "No presets loaded."
+    if [[ -n "${DEV_GET_PRESETS_INFLIGHT_PID[$id]:-}" ]]; then
+      set_right_line 0 "$width" "Presets loading..."
+    else
+      set_right_line 0 "$width" "No presets found."
+    fi
+    preset_debug_log "$id" "render" "count=0"
     return
   fi
   local i row=0
@@ -1310,11 +1342,15 @@ build_presets_lines_locked() {
     set_right_list_line "$row" "$width" "$line" $(( i == PRESET_INDEX )) 0
     row=$((row+1))
   done
+  if (( row < FRAME_INNER_ROWS )); then
+    set_right_line "$row" "$width" "Presets available (${#PRESETS_IDS[@]})"
+  fi
+  preset_debug_log "$id" "render" "count=${#PRESETS_IDS[@]}"
 }
 
 build_presets_lines() {
-  local width=$1
-  with_lock "$PRESETS_LOCK" build_presets_lines_locked "$width"
+  local id=$1 width=$2
+  with_lock "$PRESETS_LOCK" build_presets_lines_locked "$id" "$width"
 }
 
 build_effects_lines() {
@@ -1442,6 +1478,7 @@ begin_busy_refresh() {
   UI_SPINNER_LAST_MS=$(now_ms)
   schedule_state_fetch "$id"
   schedule_info_fetch "$id"
+  schedule_presets_fetch "$id"
   UI_DIRTY=1
 }
 
@@ -1669,19 +1706,7 @@ build_frame() {
         build_status_lines "$id" "$RIGHT_INNER_WIDTH"
         ;;
       1)
-        if (( ${#PRESETS_IDS[@]} == 0 )); then
-          RIGHT_LINES[0]=$(ui_pad_text "No presets loaded." "$RIGHT_INNER_WIDTH")
-        else
-          for ((i=0; i<FRAME_INNER_ROWS; i++)); do
-            if (( i < ${#PRESETS_IDS[@]} )); then
-              if (( i == PRESET_INDEX )); then
-                RIGHT_LINES[$i]="${PRESETS_ROW_SELECTED[$i]}"
-              else
-                RIGHT_LINES[$i]="${PRESETS_ROW_NORMAL[$i]}"
-              fi
-            fi
-          done
-        fi
+        build_presets_lines "$id" "$RIGHT_INNER_WIDTH"
         ;;
       2)
         if (( ${#EFFECTS[@]} == 0 )); then
