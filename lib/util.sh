@@ -6,6 +6,7 @@ IFS=$'\n\t'
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wledtui"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/wledtui"
 CONFIG_FILE="$CONFIG_DIR/devices.json"
+CONFIG_FLAGS_FILE="$CONFIG_DIR/config"
 CACHE_FILE="$CACHE_DIR/devices.json"
 CACHE_LOCK="$CACHE_DIR/devices.lock"
 DEBUG_LOG_FILE="$CACHE_DIR/debug.log"
@@ -74,6 +75,30 @@ ensure_config_dir() {
 
 ensure_cache_dir() {
   mkdir -p "$CACHE_DIR"
+}
+
+config_flag_enabled() {
+  local key=$1
+  if [[ ! -f "$CONFIG_FLAGS_FILE" ]]; then
+    return 1
+  fi
+  local line value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line=${line%%#*}
+    line=${line//$'\r'/}
+    if [[ -z "${line//[[:space:]]/}" ]]; then
+      continue
+    fi
+    if [[ "$line" =~ ^[[:space:]]*${key}[[:space:]]*=[[:space:]]*(.+)[[:space:]]*$ ]]; then
+      value=${BASH_REMATCH[1]}
+      value=${value,,}
+      if [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" ]]; then
+        return 0
+      fi
+      return 1
+    fi
+  done < "$CONFIG_FLAGS_FILE"
+  return 1
 }
 clamp() {
   local value=$1 min=$2 max=$3

@@ -33,6 +33,22 @@ UI_SPINNER_FRAMES=("|" "/" "-" "\\")
 UI_SPINNER_INDEX=0
 UI_SPINNER_LAST_MS=0
 UI_SPINNER_INTERVAL_MS=120
+NO_SPLASH=0
+SPLASH_ACTIVE=0
+SPLASH_END_MS=0
+SPLASH_DURATION_MS=1000
+SPLASH_ART=(
+  $'        .-""""-.'
+  $'      ."  .--.  ".'
+  $'     /   /    \\   \\'
+  $'    |    |  [] |   |'
+  $'    |    |  [] |   |'
+  $'    |     \\__/    |'
+  $'     \\            /'
+  $'      \'._      _.\''
+  $'         \'----\''
+  $'          TUI'
+)
 
 PRESETS_IDS=()
 PRESETS_NAMES=()
@@ -881,6 +897,46 @@ blank_line() {
   printf '%*s' "$width" ''
 }
 
+center_text() {
+  local text=$1 width=$2
+  text=$(ui_trim_text "$text" "$width")
+  local left=$(( (width - ${#text}) / 2 ))
+  if (( left < 0 )); then
+    left=0
+  fi
+  local right=$((width - left - ${#text}))
+  printf '%*s%s%*s' "$left" '' "$text" "$right" ''
+}
+
+build_splash_frame() {
+  local rows=$RENDER_ROWS cols=$RENDER_COLS
+  FRAME_LINES=()
+  local row
+  for ((row=0; row<rows; row++)); do
+    FRAME_LINES[$row]=$(blank_line "$cols")
+  done
+  local lines=(
+    "${SPLASH_ART[@]}"
+    ""
+    "WLED-TUI — third-party terminal UI for WLED devices"
+    "https://kno.wled.ge"
+    ""
+    "Not affiliated with or endorsed by the WLED project."
+  )
+  local total=${#lines[@]}
+  local start=$(( (rows - total) / 2 ))
+  if (( start < 0 )); then
+    start=0
+  fi
+  for row in "${!lines[@]}"; do
+    local target=$((start + row))
+    if (( target >= rows )); then
+      break
+    fi
+    FRAME_LINES[$target]=$(center_text "${lines[$row]}" "$cols")
+  done
+}
+
 set_right_line() {
   local row=$1 width=$2 text=$3
   if (( row < 0 || row >= FRAME_INNER_ROWS )); then
@@ -1544,6 +1600,27 @@ overlay_modal() {
   FRAME_LINES[$((row+2))]="${prefix}${overlay_line}${suffix}"
 }
 
+splash_init() {
+  if (( NO_SPLASH )); then
+    return
+  fi
+  SPLASH_ACTIVE=1
+  SPLASH_END_MS=$(( $(now_ms) + SPLASH_DURATION_MS ))
+}
+
+update_splash_state() {
+  if (( ! SPLASH_ACTIVE )); then
+    return
+  fi
+  local now
+  now=$(now_ms)
+  if (( now >= SPLASH_END_MS )); then
+    SPLASH_ACTIVE=0
+    FULL_REDRAW=1
+    UI_DIRTY=1
+  fi
+}
+
 build_frame() {
   local rows=$RENDER_ROWS cols=$RENDER_COLS
   local left_width=32
@@ -1747,6 +1824,10 @@ build_frame() {
     local footer_hint
     footer_hint=$(build_footer_hint)
     FRAME_LINES[$((rows-1))]=$(ui_format_footer "$cols" "$footer_hint")
+  fi
+
+  if (( SPLASH_ACTIVE )); then
+    build_splash_frame
   fi
 }
 
@@ -2473,6 +2554,7 @@ main_loop() {
   DEVICE_LIST_DIRTY=1
   ui_init
   set_term_title "$APP_NAME"
+  splash_init
   trap 'RESIZED=1' WINCH
 
   while true; do
@@ -2480,6 +2562,7 @@ main_loop() {
     process_discover_results
     update_busy_states
     update_spinner
+    update_splash_state
     if (( RESIZED )); then
       render_set_size
       RESIZED=0
@@ -2497,13 +2580,62 @@ main_loop() {
     local key
     key=$(read_key)
     if [[ "$key" != "__NONE__" ]]; then
+      if (( SPLASH_ACTIVE )); then
+        SPLASH_ACTIVE=0
+        FULL_REDRAW=1
+        UI_DIRTY=1
+      fi
       handle_key "$key"
     fi
   done
 }
 
-if [[ "${1:-}" == "--smoke" ]]; then
-  smoke_test "${2:-}"
+print_usage() {
+  printf 'Usage: %s [--no-splash] [--smoke HOST:PORT]\n' "$0" >&2
+}
+
+parse_args() {
+  local args=("$@")
+  local i=0
+  local count=${#args[@]}
+  while (( i < count )); do
+    local arg=${args[$i]}
+    case "$arg" in
+      --no-splash)
+        NO_SPLASH=1
+        ;;
+      --smoke)
+        SMOKE_MODE=1
+        if (( i + 1 < count )); then
+          SMOKE_TARGET=${args[$((i+1))]}
+          i=$((i+1))
+        fi
+        ;;
+      -h|--help)
+        print_usage
+        exit 0
+        ;;
+      *)
+        ;;
+    esac
+    i=$((i+1))
+  done
+}
+
+SMOKE_MODE=0
+SMOKE_TARGET=""
+parse_args "$@"
+
+if config_flag_enabled "no_splash"; then
+  NO_SPLASH=1
+fi
+
+if (( SMOKE_MODE )); then
+  if [[ -z "$SMOKE_TARGET" ]]; then
+    print_usage
+    exit 1
+  fi
+  smoke_test "$SMOKE_TARGET"
   exit $?
 fi
 
