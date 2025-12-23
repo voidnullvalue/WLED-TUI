@@ -1940,6 +1940,7 @@ handle_key() {
         if [[ -n "$id" ]]; then
           case "$TAB_INDEX" in
             0) refresh_status_pane "$id" ;;
+            1) fetch_presets "$id" ; UI_DIRTY=1 ;; # Restored after silent merge regression
             5) refresh_advanced_pane "$id" ;;
           esac
         fi
@@ -1956,6 +1957,7 @@ handle_key() {
         if [[ -n "$id" ]]; then
           case "$TAB_INDEX" in
             0) refresh_status_pane "$id" ;;
+            1) fetch_presets "$id" ; UI_DIRTY=1 ;; # Restored after silent merge regression
             5) refresh_advanced_pane "$id" ;;
           esac
         fi
