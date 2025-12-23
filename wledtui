@@ -180,6 +180,10 @@ adjust_preset_index() {
 fetch_presets() {
   local id=$1
   ensure_config_dir
+  if [[ -z "${DEV_PRESETS_JSON[$id]:-}" ]]; then
+    # Adapted to preserve preset logic from 63c9ce9
+    DEV_PRESETS_JSON[$id]=$(api_get_presets "$id" || true)
+  fi
   with_lock "$PRESETS_LOCK" fetch_presets_locked "$id"
   schedule_presets_fetch "$id"
 }
