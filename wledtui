@@ -206,7 +206,20 @@ fetch_presets_locked() {
   fi
   SELECTED_PRESET_ID="$desired_id"
   local lines=()
-  mapfile -t lines < <(parse_presets_tsv <<<"$data" 2>/dev/null || true)
+  local parse_status=0 jq_err_file jq_err
+  jq_err_file=$(mktemp)
+  if ! mapfile -t lines < <(parse_presets_tsv <<<"$data" 2>"$jq_err_file"); then
+    parse_status=$?
+  fi
+  jq_err=$(sanitize_for_display "$(head -c 200 "$jq_err_file" 2>/dev/null || true)")
+  rm -f "$jq_err_file"
+  if (( parse_status != 0 )); then
+    preset_debug_log "$id" "parse_error" "status=${parse_status} jq_err=${jq_err}"
+    PRESETS_CACHE_DIRTY=1
+    PRESET_INDEX=0
+    SELECTED_PRESET_ID="$desired_id"
+    return
+  fi
   local line pid pname
   local parsed_ids=()
   for line in "${lines[@]}"; do
@@ -217,6 +230,9 @@ fetch_presets_locked() {
     parsed_ids+=("$pid")
   done
   preset_debug_log "$id" "parsed" "keys=$(IFS=,; printf '%s' "${parsed_ids[*]}")"
+  if (( ${#PRESETS_IDS[@]} == 0 )); then
+    preset_debug_log "$id" "parse_empty" "status=${parse_status} jq_err=${jq_err}"
+  fi
   sync_preset_index "$SELECTED_PRESET_ID"
   preset_debug_log "$id" "validated" "count=${#PRESETS_IDS[@]}"
   PRESETS_CACHE_DIRTY=1
@@ -246,27 +262,30 @@ load_effects_from_cache() {
   fi
   local raw_type
   raw_type=$(jq -r 'type' <<<"$data" 2>/dev/null || true)
-  local parse_status=0
+  local parse_status=0 jq_err_file jq_err
+  jq_err_file=$(mktemp)
   local lines=()
-  if ! mapfile -t lines < <(parse_effects_tsv <<<"$data" 2>/dev/null); then
+  if ! mapfile -t lines < <(parse_effects_tsv <<<"$data" 2>"$jq_err_file"); then
     parse_status=$?
   fi
+  jq_err=$(sanitize_for_display "$(head -c 200 "$jq_err_file" 2>/dev/null || true)")
+  rm -f "$jq_err_file"
   local snippet
   snippet=$(sanitize_for_display "$(head -c 200 <<<"$data" 2>/dev/null || true)")
   if [[ -z "$raw_type" ]]; then
     DEV_EFFECTS_PARSE_ERROR[$id]="jq_error"
-    effects_debug_log "$id" "parse_error" "type=jq_error snippet=${snippet}"
+    effects_debug_log "$id" "parse_error" "type=jq_error jq_err=${jq_err} snippet=${snippet}"
     return
   fi
   if (( parse_status != 0 )); then
     DEV_EFFECTS_PARSE_ERROR[$id]="parse_error"
-    effects_debug_log "$id" "parse_error" "type=${raw_type} snippet=${snippet}"
+    effects_debug_log "$id" "parse_error" "type=${raw_type} jq_exit=${parse_status} jq_err=${jq_err} snippet=${snippet}"
     return
   fi
   if (( ${#lines[@]} == 0 )); then
     if [[ -n "$data" ]]; then
       DEV_EFFECTS_PARSE_ERROR[$id]="type=${raw_type}"
-      effects_debug_log "$id" "parse_empty" "type=${raw_type} snippet=${snippet}"
+      effects_debug_log "$id" "parse_empty" "type=${raw_type} jq_exit=${parse_status} jq_err=${jq_err} snippet=${snippet}"
     fi
     return
   fi
@@ -284,7 +303,7 @@ load_effects_from_cache() {
     fi
   fi
   DEV_EFFECTS_PARSE_ERROR[$id]=""
-  effects_debug_log "$id" "parsed" "count=${#EFFECTS[@]} type=${raw_type}"
+  effects_debug_log "$id" "parsed" "count=${#EFFECTS[@]} type=${raw_type} jq_exit=${parse_status} jq_err=${jq_err}"
 }
 
 load_palettes_from_cache() {
@@ -294,7 +313,22 @@ load_palettes_from_cache() {
   if [[ -z "$data" ]]; then
     return
   fi
-  mapfile -t PALETTES < <(jq -r '.[]' <<<"$data")
+  local parse_status=0 jq_err_file jq_err
+  jq_err_file=$(mktemp)
+  if ! mapfile -t PALETTES < <(jq -r '.[]' <<<"$data" 2>"$jq_err_file"); then
+    parse_status=$?
+  fi
+  jq_err=$(sanitize_for_display "$(head -c 200 "$jq_err_file" 2>/dev/null || true)")
+  rm -f "$jq_err_file"
+  if (( parse_status != 0 )); then
+    palettes_debug_log "$id" "parse_error" "jq_exit=${parse_status} jq_err=${jq_err}"
+    return
+  fi
+  if (( ${#PALETTES[@]} == 0 )); then
+    palettes_debug_log "$id" "parse_empty" "jq_exit=${parse_status} jq_err=${jq_err}"
+  else
+    palettes_debug_log "$id" "parsed" "count=${#PALETTES[@]} jq_exit=${parse_status} jq_err=${jq_err}"
+  fi
   PALETTES_CACHE_DIRTY=1
 }
 
@@ -342,14 +376,21 @@ effects_debug_log() {
   log_debug "effects device=${device_label} id=${id} stage=${stage} ${message}"
 }
 
+palettes_debug_log() {
+  local id=$1 stage=$2 message=$3
+  local device_label
+  device_label=$(device_display_name "$id")
+  log_debug "palettes device=${device_label} id=${id} stage=${stage} ${message}"
+}
+
 start_get_request() {
   local id=$1 type=$2 path=$3
   ensure_net_spool_dir
-  local url outfile statusfile tmp delay_ms
+  local url outfile statusfile tmp delay_ms key device_label
   url="$(api_base_url "$id")$path"
-  if [[ "$type" == "effects" ]]; then
-    effects_debug_log "$id" "schedule" "type=${type} url=$(sanitize_for_display "$url") path=${path}"
-  fi
+  key=$(net_key "$id")
+  device_label=$(device_display_name "$id")
+  log_debug "net schedule device=${device_label} id=${id} key=${key} type=${type} path=${path} url=$(sanitize_for_display "$url")"
   outfile=$(net_data_path "$id" "$type")
   statusfile=$(net_status_path "$id" "$type")
   local events_file
@@ -358,50 +399,76 @@ start_get_request() {
   delay_ms=${WLEDTUI_NET_DELAY_MS:-0}
   (
     sleep_ms "$delay_ms"
-    local exit_code=0
+    local exit_code=0 http_status="" bytes=0
+    local stderr_file stderr_snippet
+    stderr_file="${outfile}.stderr.$$"
     # Security: use -- to terminate curl options so URL data cannot inject flags.
-    if curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
-      --silent --show-error --fail -- "$url" -o "$tmp" 2>/dev/null; then
+    http_status=$(curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
+      --silent --show-error --fail \
+      --write-out '%{http_code}' \
+      -- "$url" -o "$tmp" 2>"$stderr_file")
+    exit_code=$?
+    if (( exit_code == 0 )); then
       mv "$tmp" "$outfile"
+      bytes=$(wc -c < "$outfile" | tr -d ' ')
     else
-      exit_code=$?
       rm -f "$tmp"
     fi
-    printf '%s %s\n' "$exit_code" "$(now_ts)" > "$statusfile"
+    stderr_snippet=$(sanitize_for_display "$(head -c 200 "$stderr_file" 2>/dev/null || true)")
+    rm -f "$stderr_file"
+    printf '%s %s %s %s\n' "$exit_code" "$(now_ts)" "${http_status:-}" "${bytes:-0}" > "$statusfile"
+    log_debug "net complete device=${device_label} id=${id} key=${key} type=${type} path=${path} exit=${exit_code} http=${http_status:-} bytes=${bytes:-0} stderr=${stderr_snippet}"
     printf '%s\t%s\n' "$id" "$type" >> "$events_file"
   ) &
+  log_debug "net dispatch device=${device_label} id=${id} key=${key} type=${type} path=${path} pid=$!"
   printf '%s' "$!"
 }
 
 start_presets_request() {
   local id=$1
   ensure_net_spool_dir
-  local base url outfile statusfile tmp delay_ms
+  local base url outfile statusfile tmp delay_ms key device_label
   base="$(api_base_url "$id")"
+  key=$(net_key "$id")
+  device_label=$(device_display_name "$id")
   outfile=$(net_data_path "$id" "presets")
   statusfile=$(net_status_path "$id" "presets")
   local events_file
   events_file=$(net_events_path)
   tmp="${outfile}.tmp.$$"
   delay_ms=${WLEDTUI_NET_DELAY_MS:-0}
+  log_debug "net schedule device=${device_label} id=${id} key=${key} type=presets path=/json/presets url=$(sanitize_for_display "${base}/json/presets")"
   (
     sleep_ms "$delay_ms"
-    local exit_code=0
+    local exit_code=0 http_status="" bytes=0
+    local stderr_file stderr_snippet
+    stderr_file="${outfile}.stderr.$$"
     # Regression fix: async presets fetch dropped /presets.json fallback; keep non-blocking with inline fallback.
     # Security: use -- to terminate curl options so URL data cannot inject flags.
-    if curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
-      --silent --show-error --fail -- "${base}/json/presets" -o "$tmp" 2>/dev/null; then
+    http_status=$(curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
+      --silent --show-error --fail --write-out '%{http_code}' \
+      -- "${base}/json/presets" -o "$tmp" 2>"$stderr_file")
+    exit_code=$?
+    if (( exit_code == 0 )); then
       mv "$tmp" "$outfile"
-    elif curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
-      --silent --show-error --fail -- "${base}/presets.json" -o "$tmp" 2>/dev/null; then
+      bytes=$(wc -c < "$outfile" | tr -d ' ')
+    elif http_status=$(curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
+      --silent --show-error --fail --write-out '%{http_code}' \
+      -- "${base}/presets.json" -o "$tmp" 2>"$stderr_file"); then
       mv "$tmp" "$outfile"
+      exit_code=0
+      bytes=$(wc -c < "$outfile" | tr -d ' ')
     else
       exit_code=$?
       rm -f "$tmp"
     fi
-    printf '%s %s\n' "$exit_code" "$(now_ts)" > "$statusfile"
+    stderr_snippet=$(sanitize_for_display "$(head -c 200 "$stderr_file" 2>/dev/null || true)")
+    rm -f "$stderr_file"
+    printf '%s %s %s %s\n' "$exit_code" "$(now_ts)" "${http_status:-}" "${bytes:-0}" > "$statusfile"
+    log_debug "net complete device=${device_label} id=${id} key=${key} type=presets path=/json/presets exit=${exit_code} http=${http_status:-} bytes=${bytes:-0} stderr=${stderr_snippet}"
     printf '%s\t%s\n' "$id" "presets" >> "$events_file"
   ) &
+  log_debug "net dispatch device=${device_label} id=${id} key=${key} type=presets path=/json/presets pid=$!"
   printf '%s' "$!"
 }
 
@@ -757,6 +824,9 @@ process_get_result() {
   rm -f "$status_file"
   exit_code=$(awk '{print $1}' <<<"$status_line")
   status_ts=$(awk '{print $2}' <<<"$status_line")
+  local status_http status_bytes
+  status_http=$(awk '{print $3}' <<<"$status_line")
+  status_bytes=$(awk '{print $4}' <<<"$status_line")
   local request_failed=0
   case "$type" in
     state)
@@ -796,7 +866,7 @@ process_get_result() {
         raw_size=$(wc -c < "$data_file" | tr -d ' ')
         raw_snippet=$(head -c 200 "$data_file" 2>/dev/null || true)
         raw_snippet=$(sanitize_for_display "$raw_snippet")
-        preset_debug_log "$id" "http_response" "size=${raw_size} snippet=${raw_snippet}"
+        preset_debug_log "$id" "http_response" "exit=${exit_code} http=${status_http:-} size=${raw_size} snippet=${raw_snippet}"
         DEV_PRESETS_JSON[$id]=$(cat "$data_file" 2>/dev/null || true)
         preset_debug_log "$id" "state_assign" "var=DEV_PRESETS_JSON size=${raw_size}"
         if [[ "$id" == "$(current_device_id)" && "$TAB_INDEX" == "1" ]]; then
@@ -808,12 +878,12 @@ process_get_result() {
       fi
       ;;
     effects)
-      local raw_size=0 jq_type=""
+      local raw_size=${status_bytes:-0} jq_type=""
       if [[ -f "$data_file" ]]; then
         raw_size=$(wc -c < "$data_file" | tr -d ' ')
         jq_type=$(jq -r 'type' < "$data_file" 2>/dev/null || printf 'jq_error')
       fi
-      effects_debug_log "$id" "http_complete" "exit=${exit_code} ts=${status_ts:-} size=${raw_size} jq_type=${jq_type}"
+      effects_debug_log "$id" "http_complete" "exit=${exit_code} http=${status_http:-} ts=${status_ts:-} size=${raw_size} jq_type=${jq_type}"
       if [[ "$exit_code" == "0" && -f "$data_file" ]]; then
         DEV_EFFECTS_JSON[$id]=$(cat "$data_file" 2>/dev/null || true)
         DEV_EFFECTS_TS[$id]="${status_ts:-$(now_ts)}"
@@ -824,6 +894,7 @@ process_get_result() {
       fi
       ;;
     palettes)
+      palettes_debug_log "$id" "http_complete" "exit=${exit_code} http=${status_http:-} size=${status_bytes:-0}"
       if [[ "$exit_code" == "0" && -f "$data_file" ]]; then
         DEV_PALETTES_JSON[$id]=$(cat "$data_file" 2>/dev/null || true)
         if [[ "$id" == "$(current_device_id)" && "$TAB_INDEX" == "3" ]]; then
@@ -1545,6 +1616,7 @@ begin_busy_scan() {
 begin_busy_refresh() {
   local id=$1
   [[ -z "$id" ]] && return
+  log_debug "refresh begin device=$(device_display_name "$id") id=${id} key=$(net_key "$id") jobs=state,info,presets,effects,palettes"
   UI_BUSY_REFRESH=1
   UI_BUSY_REFRESH_ID="$id"
   UI_BUSY_REFRESH_ERROR=0
@@ -1555,6 +1627,8 @@ begin_busy_refresh() {
   schedule_state_fetch "$id"
   schedule_info_fetch "$id"
   schedule_presets_fetch "$id"
+  schedule_effects_fetch "$id"
+  schedule_palettes_fetch "$id"
   UI_DIRTY=1
 }
 
@@ -1914,6 +1988,13 @@ handle_key() {
       ;;
     $'\e[Z'|$'\e[1;2Z')
       TAB_INDEX=$(( (TAB_INDEX - 1 + ${#TAB_NAMES[@]}) % ${#TAB_NAMES[@]} ))
+      if [[ -n "$id" ]]; then
+        case "$TAB_INDEX" in
+          1) fetch_presets "$id" ;;
+          2) fetch_effects "$id" ;;
+          3) fetch_palettes "$id" ;;
+        esac
+      fi
       UI_DIRTY=1
       ;;
     $'\e[A')
@@ -1936,6 +2017,7 @@ handle_key() {
       ;;
     r)
       if [[ -n "$id" ]]; then
+        log_debug "refresh key device=$(device_display_name "$id") id=${id} tab=${TAB_INDEX}"
         begin_busy_refresh "$id"
       fi
       ;;
@@ -1987,6 +2069,17 @@ handle_key() {
         if [[ -n "$id" ]]; then
           case "$TAB_INDEX" in
             0) refresh_status_pane "$id" ;;
+            1) fetch_presets "$id" ; UI_DIRTY=1 ;;
+            2) fetch_effects "$id" ; UI_DIRTY=1 ;;
+            3) fetch_palettes "$id" ; UI_DIRTY=1 ;;
+            4)
+              SEGMENTS=()
+              if [[ -n "${DEV_STATE_JSON[$id]:-}" ]]; then
+                mapfile -t SEGMENTS < <(jq -c '.seg[]?' <<<"${DEV_STATE_JSON[$id]}" 2>/dev/null || true)
+                update_segment_texts
+              fi
+              UI_DIRTY=1
+              ;;
             5) refresh_advanced_pane "$id" ;;
           esac
         fi
@@ -2003,6 +2096,17 @@ handle_key() {
         if [[ -n "$id" ]]; then
           case "$TAB_INDEX" in
             0) refresh_status_pane "$id" ;;
+            1) fetch_presets "$id" ; UI_DIRTY=1 ;;
+            2) fetch_effects "$id" ; UI_DIRTY=1 ;;
+            3) fetch_palettes "$id" ; UI_DIRTY=1 ;;
+            4)
+              SEGMENTS=()
+              if [[ -n "${DEV_STATE_JSON[$id]:-}" ]]; then
+                mapfile -t SEGMENTS < <(jq -c '.seg[]?' <<<"${DEV_STATE_JSON[$id]}" 2>/dev/null || true)
+                update_segment_texts
+              fi
+              UI_DIRTY=1
+              ;;
             5) refresh_advanced_pane "$id" ;;
           esac
         fi
