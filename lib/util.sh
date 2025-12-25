@@ -149,6 +149,49 @@ parse_presets_tsv() {
   '
 }
 
+parse_effects_tsv() {
+  jq -r '
+    def normalize_name($fallback):
+      if type == "object" then
+        (.name // .n // .label // .id // .title // $fallback | tostring)
+      else
+        tostring
+      end;
+
+    def entries_from_array:
+      to_entries
+      | map(select(.value != null))
+      | map({id:(.key|tonumber), name:(.value | normalize_name((.key|tostring)))});
+
+    def entries_from_object:
+      if has("effects") and (.effects|type == "array") then
+        (.effects | entries_from_array)
+      else
+        (to_entries | sort_by(.key)) as $entries
+        | ($entries | map(select(.key|test("^-?\\d+$")) | (.key|tonumber)) | max // -1) as $max_numeric
+        | reduce $entries[] as $entry (
+            {rows:[], next:($max_numeric + 1)};
+            .rows += [{
+              id: (if ($entry.key|test("^-?\\d+$")) then ($entry.key|tonumber) else .next end),
+              name: ($entry.value | normalize_name($entry.key))
+            }]
+            | (if ($entry.key|test("^-?\\d+$")) then . else (.next += 1) end)
+          )
+        | .rows
+      end;
+
+    if type == "array" then
+      entries_from_array
+      | .[]
+      | "\(.id)\t\(.name)"
+    elif type == "object" then
+      entries_from_object
+      | .[]
+      | "\(.id)\t\(.name)"
+    else empty end
+  '
+}
+
 read_key() {
   local key
   if IFS= read -rsn1 -t 0.05 key; then

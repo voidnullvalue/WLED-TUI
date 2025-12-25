@@ -37,6 +37,7 @@ UI_SPINNER_INTERVAL_MS=120
 PRESETS_IDS=()
 PRESETS_NAMES=()
 EFFECTS=()
+EFFECT_IDS=()
 PALETTES=()
 SEGMENTS=()
 PRESET_INDEX=0
@@ -236,12 +237,54 @@ fetch_palettes() {
 load_effects_from_cache() {
   local id=$1
   EFFECTS=()
+  EFFECT_IDS=()
+  DEV_EFFECTS_PARSE_ERROR[$id]=""
+  EFFECTS_CACHE_DIRTY=1
   local data="${DEV_EFFECTS_JSON[$id]:-}"
   if [[ -z "$data" ]]; then
     return
   fi
-  mapfile -t EFFECTS < <(jq -r '.[]' <<<"$data")
-  EFFECTS_CACHE_DIRTY=1
+  local raw_type
+  raw_type=$(jq -r 'type' <<<"$data" 2>/dev/null || true)
+  local parse_status=0
+  local lines=()
+  if ! mapfile -t lines < <(parse_effects_tsv <<<"$data" 2>/dev/null); then
+    parse_status=$?
+  fi
+  local snippet
+  snippet=$(sanitize_for_display "$(head -c 200 <<<"$data" 2>/dev/null || true)")
+  if [[ -z "$raw_type" ]]; then
+    DEV_EFFECTS_PARSE_ERROR[$id]="jq_error"
+    effects_debug_log "$id" "parse_error" "type=jq_error snippet=${snippet}"
+    return
+  fi
+  if (( parse_status != 0 )); then
+    DEV_EFFECTS_PARSE_ERROR[$id]="parse_error"
+    effects_debug_log "$id" "parse_error" "type=${raw_type} snippet=${snippet}"
+    return
+  fi
+  if (( ${#lines[@]} == 0 )); then
+    if [[ -n "$data" ]]; then
+      DEV_EFFECTS_PARSE_ERROR[$id]="type=${raw_type}"
+      effects_debug_log "$id" "parse_empty" "type=${raw_type} snippet=${snippet}"
+    fi
+    return
+  fi
+  local line idx name
+  for line in "${lines[@]}"; do
+    IFS=$'\t' read -r idx name <<<"$line"
+    [[ -z "$idx" ]] && continue
+    EFFECT_IDS+=("$idx")
+    EFFECTS+=("$name")
+  done
+  if (( EFFECT_INDEX >= ${#EFFECTS[@]} )); then
+    EFFECT_INDEX=$(( ${#EFFECTS[@]} - 1 ))
+    if (( EFFECT_INDEX < 0 )); then
+      EFFECT_INDEX=0
+    fi
+  fi
+  DEV_EFFECTS_PARSE_ERROR[$id]=""
+  effects_debug_log "$id" "parsed" "count=${#EFFECTS[@]} type=${raw_type}"
 }
 
 load_palettes_from_cache() {
@@ -292,11 +335,21 @@ preset_debug_log() {
   log_debug "DEBUG_PRESETS_REMOVE device=${device_label} id=${id} cycle=${cycle} stage=${stage} ${message}"
 }
 
+effects_debug_log() {
+  local id=$1 stage=$2 message=$3
+  local device_label
+  device_label=$(device_display_name "$id")
+  log_debug "effects device=${device_label} id=${id} stage=${stage} ${message}"
+}
+
 start_get_request() {
   local id=$1 type=$2 path=$3
   ensure_net_spool_dir
   local url outfile statusfile tmp delay_ms
   url="$(api_base_url "$id")$path"
+  if [[ "$type" == "effects" ]]; then
+    effects_debug_log "$id" "schedule" "type=${type} url=$(sanitize_for_display "$url") path=${path}"
+  fi
   outfile=$(net_data_path "$id" "$type")
   statusfile=$(net_status_path "$id" "$type")
   local events_file
@@ -699,10 +752,11 @@ process_get_result() {
   if [[ ! -f "$status_file" ]]; then
     return
   fi
-  local status_line exit_code
+  local status_line exit_code status_ts
   status_line=$(cat "$status_file" 2>/dev/null || true)
   rm -f "$status_file"
   exit_code=$(awk '{print $1}' <<<"$status_line")
+  status_ts=$(awk '{print $2}' <<<"$status_line")
   local request_failed=0
   case "$type" in
     state)
@@ -754,9 +808,16 @@ process_get_result() {
       fi
       ;;
     effects)
+      local raw_size=0 jq_type=""
+      if [[ -f "$data_file" ]]; then
+        raw_size=$(wc -c < "$data_file" | tr -d ' ')
+        jq_type=$(jq -r 'type' < "$data_file" 2>/dev/null || printf 'jq_error')
+      fi
+      effects_debug_log "$id" "http_complete" "exit=${exit_code} ts=${status_ts:-} size=${raw_size} jq_type=${jq_type}"
       if [[ "$exit_code" == "0" && -f "$data_file" ]]; then
         DEV_EFFECTS_JSON[$id]=$(cat "$data_file" 2>/dev/null || true)
-        if [[ "$id" == "$(current_device_id)" && "$TAB_INDEX" == "2" ]]; then
+        DEV_EFFECTS_TS[$id]="${status_ts:-$(now_ts)}"
+        if [[ "$id" == "$(current_device_id)" ]]; then
           load_effects_from_cache "$id"
           UI_DIRTY=1
         fi
@@ -1026,7 +1087,7 @@ rebuild_effects_cache() {
   EFFECTS_ROW_SELECTED=()
   local i line
   for i in "${!EFFECTS[@]}"; do
-    line="$i: ${EFFECTS[$i]}"
+    printf -v line '%4s  %s' "${EFFECT_IDS[$i]:-$i}" "${EFFECTS[$i]}"
     EFFECTS_ROW_NORMAL[$i]=$(ui_format_list_item "$line" "$RIGHT_INNER_WIDTH" 0 0)
     EFFECTS_ROW_SELECTED[$i]=$(ui_format_list_item "$line" "$RIGHT_INNER_WIDTH" 1 0)
   done
@@ -1359,14 +1420,25 @@ build_presets_lines() {
 
 build_effects_lines() {
   local width=$1
+  local id
+  id=$(current_device_id)
   if [[ ${#EFFECTS[@]} -eq 0 ]]; then
-    set_right_line 0 "$width" "No effects loaded."
+    local hint="No effects loaded."
+    local parse_hint=""
+    if [[ -n "$id" ]]; then
+      parse_hint="${DEV_EFFECTS_PARSE_ERROR[$id]:-}"
+    fi
+    if [[ -n "$parse_hint" ]] && (( FRAME_INNER_ROWS > 1 )); then
+      set_right_line $((FRAME_INNER_ROWS-1)) "$width" "Effects parse failed; enable WLEDTUI_DEBUG=1"
+    fi
+    set_right_line 0 "$width" "$hint"
     return
   fi
   local i row=0
   for i in "${!EFFECTS[@]}"; do
     (( row >= FRAME_INNER_ROWS )) && break
-    local line="$i: ${EFFECTS[$i]}"
+    local line
+    printf -v line '%4s  %s' "${EFFECT_IDS[$i]:-$i}" "${EFFECTS[$i]}"
     set_right_list_line "$row" "$width" "$line" $(( i == EFFECT_INDEX )) 0
     row=$((row+1))
   done
@@ -1714,7 +1786,16 @@ build_frame() {
         ;;
       2)
         if (( ${#EFFECTS[@]} == 0 )); then
-          RIGHT_LINES[0]=$(ui_pad_text "No effects loaded." "$RIGHT_INNER_WIDTH")
+          local hint="No effects loaded."
+          local parse_hint="${DEV_EFFECTS_PARSE_ERROR[$id]:-}"
+          local hint_row=0
+          if [[ -n "$parse_hint" ]] && (( FRAME_INNER_ROWS > 1 )); then
+            hint_row=$((FRAME_INNER_ROWS-1))
+          fi
+          if [[ -n "$parse_hint" ]]; then
+            RIGHT_LINES[$hint_row]=$(ui_pad_text "Effects parse failed; enable WLEDTUI_DEBUG=1" "$RIGHT_INNER_WIDTH")
+          fi
+          RIGHT_LINES[0]=$(ui_pad_text "$hint" "$RIGHT_INNER_WIDTH")
         else
           for ((i=0; i<FRAME_INNER_ROWS; i++)); do
             if (( i < ${#EFFECTS[@]} )); then
@@ -2228,13 +2309,25 @@ handle_enter() {
       if [[ -n "${EFFECTS[$EFFECT_INDEX]:-}" ]]; then
         local seg=${SEGMENTS[$SEGMENT_INDEX]:-}
         if [[ -n "$seg" ]]; then
-          seg=$(jq -c --argjson fx "$EFFECT_INDEX" '.fx=$fx' <<<"$seg")
-          SEGMENTS[$SEGMENT_INDEX]="$seg"
-          update_segment_texts
-          if (( SEG_APPLY_ALL )); then
-            enqueue_patch "$id" "$(jq -n --argjson fx "$EFFECT_INDEX" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,fx:$fx}],applyAll:true}')"
+          local effect_id=${EFFECT_IDS[$EFFECT_INDEX]:-$EFFECT_INDEX}
+          if [[ "$effect_id" =~ ^-?[0-9]+$ ]]; then
+            seg=$(jq -c --argjson fx "$effect_id" '.fx=$fx' <<<"$seg")
+            SEGMENTS[$SEGMENT_INDEX]="$seg"
+            update_segment_texts
+            if (( SEG_APPLY_ALL )); then
+              enqueue_patch "$id" "$(jq -n --argjson fx "$effect_id" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,fx:$fx}],applyAll:true}')"
+            else
+              enqueue_patch "$id" "$(jq -n --argjson fx "$effect_id" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,fx:$fx}]}')"
+            fi
           else
-            enqueue_patch "$id" "$(jq -n --argjson fx "$EFFECT_INDEX" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,fx:$fx}]}')"
+            seg=$(jq -c --arg fx "$effect_id" '.fx=$fx' <<<"$seg")
+            SEGMENTS[$SEGMENT_INDEX]="$seg"
+            update_segment_texts
+            if (( SEG_APPLY_ALL )); then
+              enqueue_patch "$id" "$(jq -n --arg fx "$effect_id" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,fx:$fx}],applyAll:true}')"
+            else
+              enqueue_patch "$id" "$(jq -n --arg fx "$effect_id" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,fx:$fx}]}')"
+            fi
           fi
         fi
       fi
@@ -2518,6 +2611,27 @@ smoke_test() {
       fi
       printf 'Preset after apply: %s\n' "$(jq -r '.ps // 0' <<<"$state")"
     fi
+  fi
+
+  TAB_INDEX=2
+  local effects_pid
+  effects_pid=$(start_get_request "$id" "effects" "/json/effects")
+  DEV_GET_EFFECTS_INFLIGHT_PID[$id]="$effects_pid"
+  local attempts=0
+  while (( attempts < 50 )); do
+    sleep_ms 100
+    process_network_queue
+    if [[ -z "${DEV_GET_EFFECTS_INFLIGHT_PID[$id]:-}" ]]; then
+      break
+    fi
+    attempts=$((attempts+1))
+  done
+  load_effects_from_cache "$id"
+  local effects_count=${#EFFECTS[@]}
+  printf 'effects_count=%s\n' "$effects_count"
+  if (( effects_count <= 0 )); then
+    printf 'Effects fetch failed via async pipeline\n' >&2
+    return 1
   fi
 }
 
