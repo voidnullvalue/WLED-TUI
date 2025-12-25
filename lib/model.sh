@@ -49,6 +49,8 @@ declare -A DEV_LIVE=()
 declare -A DEV_PRESETS_JSON=()
 declare -A DEV_PRESETS_CYCLE=()
 declare -A DEV_EFFECTS_JSON=()
+declare -A DEV_EFFECTS_PARSE_ERROR=()
+declare -A DEV_EFFECTS_TS=()
 declare -A DEV_PALETTES_JSON=()
 declare -A DEV_STATE_TS=()
 declare -A DEV_STATE_STALE=()
@@ -126,6 +128,8 @@ model_add_device() {
   DEV_PRESETS_JSON[$id]=""
   DEV_PRESETS_CYCLE[$id]="0"
   DEV_EFFECTS_JSON[$id]=""
+  DEV_EFFECTS_PARSE_ERROR[$id]=""
+  DEV_EFFECTS_TS[$id]="0"
   DEV_PALETTES_JSON[$id]=""
   DEV_STATE_TS[$id]="0"
   DEV_STATE_STALE[$id]="0"
@@ -154,6 +158,7 @@ model_remove_device() {
   unset DEV_TRANSITION[$id] DEV_NL_ON[$id] DEV_NL_DUR[$id] DEV_LIVE[$id]
   unset DEV_PRESETS_JSON[$id] DEV_EFFECTS_JSON[$id] DEV_PALETTES_JSON[$id]
   unset DEV_PRESETS_CYCLE[$id]
+  unset DEV_EFFECTS_PARSE_ERROR[$id] DEV_EFFECTS_TS[$id]
   unset DEV_STATE_TS[$id] DEV_STATE_STALE[$id]
 }
 
