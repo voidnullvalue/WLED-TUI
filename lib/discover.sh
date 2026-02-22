@@ -68,13 +68,28 @@ discover_devices_report() {
   done
 }
 
+parse_discovery_entry() {
+  local entry=$1
+  local name host addr port
+  IFS='|' read -r name host addr port <<<"$entry"
+  if [[ -z "$host" || -z "$port" ]]; then
+    return 1
+  fi
+  if ! is_valid_port "$port"; then
+    return 1
+  fi
+  printf '%s\t%s\t%s\t%s\n' "$name" "$host" "$addr" "$port"
+}
+
 discover_devices() {
   local now
   now=$(now_ts)
-  local entry name host port
+  local entry parsed name host addr port
   while IFS= read -r entry; do
     [[ -z "$entry" ]] && continue
-    IFS='|' read -r name host port <<<"$entry"
+    parsed=$(parse_discovery_entry "$entry" || true)
+    [[ -z "$parsed" ]] && continue
+    IFS=$'\t' read -r name host addr port <<<"$parsed"
     # Security: only add devices with validated host/port values.
     if ! model_add_device "$name" "$host" "$port"; then
       continue

@@ -18,12 +18,13 @@ Discovery sequence:
 - Primary: `_wled._tcp` via `avahi-browse -rtp`.
 - If none found: fallback `_http._tcp`, then probe each candidate via `/json/info` (`api_probe_wled`).
 - Results saved to `discover.results`; status to `discover.status`.
-- Main loop calls `process_discover_results`, adds devices (`model_add_device`), schedules initial async fetches.
+- Main loop calls `process_discover_results`, parses each line via `parse_discovery_entry`, adds devices (`model_add_device`), schedules initial async fetches.
+- Malformed discovery lines are skipped and debug-logged instead of being applied.
 
 ## Device switch flow (`[` / `]` or up/down in default tabs)
-- Mutates `SELECTED_DEVICE_INDEX`.
-- Updates left-pane selection rows incrementally.
-- Depending on current tab, refreshes pane data or schedules tab-specific fetch.
+- `select_device_delta` clamps movement bounds and delegates transition work to `on_selected_device_changed`.
+- `on_selected_device_changed` updates selection/topbar and performs tab-specific side effects.
+- This unifies behavior for `[` / `]` and default-tab `↑`/`↓` paths.
 
 ## Refresh flow (`r`)
 `handle_key('r')` -> `begin_busy_refresh(id)` -> schedules `state/info/presets/effects/palettes` GETs.

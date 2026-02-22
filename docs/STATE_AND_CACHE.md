@@ -54,6 +54,9 @@ Written by `model_save_devices`:
 - Stale state: `DEV_STATE_STALE[id]=1` (typically after state request failure while cached state exists).
 - Backoff: `DEV_BACKOFF` doubles up to clamp range (2..30 seconds for poll scheduling marker).
 
+## Normalization notes
+- `model_add_device` now initializes `DEV_ON` with boolean string `false` (not numeric `0`) to align with runtime boolean comparisons and display helpers.
+
 ## Concurrency notes
 - Event queue (`events.queue`) is moved atomically before processing; helps reduce interleaving.
 - Background workers append lines concurrently without a file lock (**Inference:** append races are unlikely but possible under extreme churn).
