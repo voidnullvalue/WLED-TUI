@@ -396,3 +396,8 @@ Rationale: behavior is relatively coherent, but heavy global-state coupling and 
 - No benchmark target documented for acceptable cache-write frequency under multi-device refresh.
 - Limited observability for race windows in `events.queue` append path without stress tooling.
 
+## Implemented in Pass 3 (Status Notes)
+- Implemented shared discovery entry parsing helper (`parse_discovery_entry`) and migrated discovery consumers to use it.
+- Fixed the confirmed `discover_devices` field mismatch (`name|host|addr|port` parsing).
+- Implemented shared device-selection transition hook (`on_selected_device_changed` + `select_device_delta`) and migrated duplicated paths in `handle_key`/`handle_up`/`handle_down`.
+- Normalized `model_add_device` power default to `false` to align with runtime boolean semantics.

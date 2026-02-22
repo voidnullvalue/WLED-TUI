@@ -111,7 +111,7 @@ model_add_device() {
   DEV_GET_PRESETS_INFLIGHT_PID[$id]=""
   DEV_GET_EFFECTS_INFLIGHT_PID[$id]=""
   DEV_GET_PALETTES_INFLIGHT_PID[$id]=""
-  DEV_ON[$id]="0"
+  DEV_ON[$id]="false"
   DEV_PRESET[$id]="0"
   DEV_VER[$id]=""
   DEV_WIFI[$id]=""

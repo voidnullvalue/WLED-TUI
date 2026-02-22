@@ -20,7 +20,7 @@ Links: [Function Index](./FUNCTION_INDEX.md), [Call Flows](./CALL_FLOWS.md).
 | `a` | Devices | `handle_add_device` | Prompt add host:port | device model/cache | none immediate |
 | `d` | Devices | `handle_delete_device` | Confirm delete | device model/cache | none |
 | `e` | Devices | `handle_edit_device` | Prompt edit host:port | device model/cache | none |
-| `[` / `]` | Devices | `handle_key` branches | Prev/next device | `SELECTED_DEVICE_INDEX` | tab-specific fetch maybe triggered |
+| `[` / `]` | Devices | `handle_key` -> `select_device_delta` | Prev/next device | `SELECTED_DEVICE_INDEX` | tab-specific fetch/refresh via shared `on_selected_device_changed` hook |
 | `l` | Global / advanced usage | `handle_live_toggle` | Toggle live mode | `DEV_DESIRED_LIVE` | enqueue `{live:...}` |
 | `b` | Global | `handle_reboot` | Reboot (with confirm) | none local | enqueue `{rb:true}` |
 | `i` | Effects tab | `handle_key` | Toggle speed/intensity adjust target | `EFFECT_PARAM` | none |
