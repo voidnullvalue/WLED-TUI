@@ -10,12 +10,11 @@ API_MAX_TIME=2
 
 api_base_url() {
   local id=${1:-}
+  [[ -n "$id" ]] || return 1
   local host="${DEV_HOST[$id]:-}"
   local port="${DEV_PORT[$id]:-}"
   local ip="${DEV_IP[$id]:-}"
   local endpoint="$host"
-
-  [[ -n "$id" ]] || return 1
   [[ -n "$host" ]] || return 1
   [[ -n "$port" ]] || return 1
   is_valid_port "$port" || return 1

@@ -23,14 +23,14 @@ discover_parse_avahi() {
 
 discover_primary() {
   if ! is_command avahi-browse; then
-    return
+    return 0
   fi
   discover_parse_avahi '_wled._tcp'
 }
 
 discover_secondary() {
   if ! is_command avahi-browse; then
-    return
+    return 0
   fi
   discover_parse_avahi '_http._tcp'
 }
@@ -40,7 +40,7 @@ discover_secondary_verified() {
   local -a entries=()
   local -a pids=()
   local -a files=()
-  local entry name host addr port out pid
+  local entry="" name="" host="" addr="" port="" out="" pid=""
   while IFS= read -r entry; do
     [[ -z "$entry" ]] && continue
     entries+=("$entry")
@@ -67,11 +67,12 @@ discover_secondary_verified() {
     [[ -s "$out" ]] && cat "$out"
     rm -f "$out"
   done
+  return 0
 }
 
 discover_devices_report() {
   local found=()
-  local entry name host addr port info
+  local entry="" name="" host="" addr="" port="" info=""
 
   while IFS= read -r entry; do
     [[ -z "$entry" ]] && continue
@@ -89,14 +90,15 @@ discover_devices_report() {
 
   for entry in "${found[@]}"; do
     IFS='|' read -r name host addr port info <<<"$entry"
-    local use_host
-    if [[ -n "$host" ]]; then
+    local use_host=""
+    if [[ -n "${host:-}" ]]; then
       use_host="$host"
     else
       use_host="$addr"
     fi
     printf '%s|%s|%s|%s|%s\n' "$name" "$use_host" "$addr" "$port" "$info"
   done
+  return 0
 }
 
 parse_discovery_entry() {
@@ -115,7 +117,7 @@ parse_discovery_entry() {
 discover_devices() {
   local now
   now=$(now_ts)
-  local entry parsed name host addr port info
+  local entry="" parsed="" name="" host="" addr="" port="" info=""
   while IFS= read -r entry; do
     [[ -z "$entry" ]] && continue
     parsed=$(parse_discovery_entry "$entry" || true)
@@ -128,4 +130,5 @@ discover_devices() {
     fi
     DEV_LAST_SEEN[$id]="$now"
   done < <(discover_devices_report)
+  return 0
 }
