@@ -38,6 +38,12 @@ is_valid_host() {
   [[ -n "$host" && "$host" =~ ^[A-Za-z0-9._-]+$ ]]
 }
 
+
+is_ip_literal() {
+  local v=${1:-}
+  [[ "$v" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
+}
+
 is_valid_port() {
   local port=$1
   # Security: require numeric TCP port ranges to prevent URL/argument injection.

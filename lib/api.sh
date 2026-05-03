@@ -10,15 +10,20 @@ API_MAX_TIME=2
 
 api_base_url() {
   local id=$1
-  local endpoint="${DEV_IP[$id]:-${DEV_HOST[$id]}}"
+  local endpoint="${DEV_HOST[$id]}"
+  if [[ -n "${DEV_IP[$id]:-}" ]] && is_ip_literal "${DEV_IP[$id]}"; then endpoint="${DEV_IP[$id]}"; fi
   printf 'http://%s:%s' "$endpoint" "${DEV_PORT[$id]}"
 }
 
 api_request() {
   local method=$1 id=$2 path=$3 payload=${4:-}
-  local url
-  url="$(api_base_url "$id")$path"
-  local response exit_code
+  local primary secondary url response exit_code
+  primary="$(api_base_url "$id")"
+  secondary="http://${DEV_HOST[$id]}:${DEV_PORT[$id]}"
+  for base in "$primary" "$secondary"; do
+    [[ -z "$base" ]] && continue
+    [[ "$base" == "$primary" || "$base" != "$primary" ]] || continue
+    url="$base$path"
   if [[ "$method" == "GET" ]]; then
     # Security: use -- to terminate curl options so URL data cannot inject flags.
     if response=$(curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
@@ -38,6 +43,10 @@ api_request() {
       exit_code=$?
     fi
   fi
+    if (( exit_code == 0 )); then break; fi
+    log_debug "request_failed endpoint=${url}"
+    if [[ "$base" == "$secondary" || "$secondary" == "$primary" ]]; then break; fi
+  done
   local device_label="$id"
   if declare -F device_display_name >/dev/null 2>&1; then
     device_label=$(device_display_name "$id")

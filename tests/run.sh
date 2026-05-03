@@ -101,3 +101,14 @@ DEV_NAME[$id2]=""
 pass "device_display_name preference chain remains alias>wled>mdns>host:port"
 
 echo "ALL TESTS PASSED"
+
+id_ret=$(model_add_device "Desk Strip" "desk-strip.local" 80 "10.0.0.11")
+[[ "$id_ret" == "$id2" ]]
+pass "model_add_device returns merged id"
+
+DEV_STATE_JSON[$id2]='{"bri":128,"on":true,"ps":4}'
+DEV_INFO_JSON[$id2]='{"name":"Desk Strip","ver":"0.15"}'
+model_save_devices
+jq -e '.devices[]|select(.host=="desk-strip.local")|.state|type=="object"' "$CACHE_FILE" >/dev/null
+jq -e '.devices[]|select(.host=="desk-strip.local")|.info|type=="object"' "$CACHE_FILE" >/dev/null
+pass "cache state/info saved as objects"
