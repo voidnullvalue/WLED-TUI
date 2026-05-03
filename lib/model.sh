@@ -220,7 +220,6 @@ model_load_devices() {
       DEV_TRANSITION[$id]=$(jq -r '.transition // 0' <<<"$state")
       DEV_NL_ON[$id]=$(jq -r '.nl.on // false' <<<"$state")
       DEV_NL_DUR[$id]=$(jq -r '.nl.dur // 0' <<<"$state")
-      DEV_LIVE[$id]=$(jq -r '.live // false' <<<"$state")
       DEV_STATE_STALE[$id]="1"
     fi
   done
