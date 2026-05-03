@@ -269,3 +269,31 @@ rc_sched2=$?
 set -e
 [[ $rc_sched2 -eq 0 ]]
 pass "canonical discovery id keeps endpoint and pretty name while scheduling remains non-fatal"
+
+# process_discover_results should schedule by canonical id returned from model_add_device
+unset -f api_base_url
+source ./lib/api.sh
+DEVICE_IDS=()
+declare -A DEV_NAME=() DEV_ALIAS=() DEV_WLED_NAME=() DEV_LAST_GOOD_WLED_NAME=() DEV_HOST=() DEV_PORT=() DEV_IP=() DEV_MAC=() DEV_LAST_SEEN=()
+declare -A DEV_INFO_JSON=() DEV_INFO_TS=() DEV_INFO_STALE=() DEV_VER=() DEV_WIFI=() DEV_UPTIME=() DEV_LIVE=()
+declare -A DEV_GET_STATE_INFLIGHT_PID=() DEV_GET_INFO_INFLIGHT_PID=() DEV_GET_PRESETS_INFLIGHT_PID=() DEV_GET_EFFECTS_INFLIGHT_PID=() DEV_GET_PALETTES_INFLIGHT_PID=()
+declare -a scheduled_ids=()
+schedule_state_fetch(){ scheduled_ids+=("state:$1"); return 0; }
+schedule_info_fetch(){ scheduled_ids+=("info:$1"); return 0; }
+schedule_presets_fetch(){ scheduled_ids+=("presets:$1"); return 0; }
+canonical_existing=$(model_add_device "Living Room" "living-room.local" 80 "192.168.88.40" "e8f60a1dcb2c")
+DEV_ALIAS[$canonical_existing]="Living Alias"
+mkdir -p "$CACHE_DIR/net"
+cat > "$CACHE_DIR/net/discover.results" <<'EOF'
+wled-1dcb2c|wled-1dcb2c.local|192.168.88.46|80|{"name":"wled-1dcb2c","mac":"e8f60a1dcb2c","ip":"192.168.88.46","ver":"0.15.0","leds":{}}
+EOF
+printf '0 %s\n' "$(now_ts)" > "$CACHE_DIR/net/discover.status"
+DISCOVER_REQUESTED=1
+process_discover_results
+[[ " ${DEVICE_IDS[*]} " == *" $canonical_existing "* ]]
+[[ -n "${DEV_HOST[$canonical_existing]:-}" && -n "${DEV_PORT[$canonical_existing]:-}" && -n "${DEV_IP[$canonical_existing]:-}" && -n "${DEV_MAC[$canonical_existing]:-}" ]]
+[[ " ${scheduled_ids[*]} " == *" state:$canonical_existing "* && " ${scheduled_ids[*]} " == *" info:$canonical_existing "* && " ${scheduled_ids[*]} " == *" presets:$canonical_existing "* ]]
+[[ " ${scheduled_ids[*]} " != *" wled-1dcb2c.local:80 "* ]]
+[[ "$(device_display_name "$canonical_existing")" == "Living Alias" ]]
+[[ "${DEV_IP[$canonical_existing]:-}" == "192.168.88.46" && "${DEV_HOST[$canonical_existing]:-}" == "wled-1dcb2c.local" && "${DEV_PORT[$canonical_existing]:-}" == "80" ]]
+pass "process_discover_results schedules canonical id and preserves alias while updating endpoint/ip"
