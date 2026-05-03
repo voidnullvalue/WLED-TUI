@@ -212,12 +212,22 @@ pass "current_device_id returns empty when no devices/out-of-range"
 
 before_jobs=$(jobs -pr | wc -l | tr -d ' ')
 set +e
-start_get_request "missing:80" "state" "/json/state" >/dev/null
+no_pid="$(start_get_request "" "state" "/json/state")"
 bad_rc=$?
 set -e
 after_jobs=$(jobs -pr | wc -l | tr -d ' ')
-[[ $bad_rc -ne 0 && "$before_jobs" == "$after_jobs" ]]
-pass "start_get_request invalid id returns nonzero and creates no job"
+[[ $bad_rc -eq 0 && -z "$no_pid" && "$before_jobs" == "$after_jobs" ]]
+pass "start_get_request invalid id returns success skip with empty pid and no job"
+
+(exit 7) &
+DISCOVER_INFLIGHT_PID=$!
+DISCOVER_REQUESTED=1
+UI_BUSY_SCAN=1
+mkdir -p "$CACHE_DIR/net"
+printf '0 %s\n' "$(now_ts)" > "$CACHE_DIR/net/discover.status"
+process_discover_results
+[[ "$UI_BUSY_SCAN" -eq 0 && -z "${DISCOVER_INFLIGHT_PID:-}" ]]
+pass "discover wait failure is nonfatal and clears busy scan state"
 
 api_base_url(){ echo "SHOULD_NOT_RUN" >&2; return 99; }
 DEVICE_IDS=()

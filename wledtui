@@ -13,6 +13,10 @@ source "$ROOT_DIR/lib/api.sh"
 source "$ROOT_DIR/lib/discover.sh"
 source "$ROOT_DIR/lib/ui.sh"
 
+if [[ "${WLEDTUI_DEBUG:-}" == "1" ]]; then
+  trap 'log_debug "ERR line=${LINENO} cmd=${BASH_COMMAND} status=$?"' ERR
+fi
+
 APP_NAME="WLED TUI"
 TAB_NAMES=("STATUS" "PRESETS" "EFFECTS" "PALETTES" "SEGMENTS" "ADVANCED")
 TAB_INDEX=0
@@ -400,11 +404,12 @@ start_get_request() {
   local id=$1 type=$2 path=$3
   if ! device_has_endpoint "$id"; then
     log_debug "net skip invalid_device_id=${id:-} type=${type:-unknown}"
-    return 1
+    return 0
   fi
   ensure_net_spool_dir
   local url outfile statusfile tmp delay_ms key device_label
-  url="$(api_base_url "$id")$path"
+  url="$(api_base_url "$id" || true)$path"
+  [[ -n "$url" ]] || return 0
   key=$(net_key "$id")
   device_label=$(device_display_name "$id")
   log_debug "net schedule device=${device_label} id=${id} key=${key} type=${type} path=${path} url=$(sanitize_for_display "$url")"
@@ -445,11 +450,12 @@ start_presets_request() {
   local id=$1
   if ! device_has_endpoint "$id"; then
     log_debug "net skip invalid_device_id=${id:-} type=presets"
-    return 1
+    return 0
   fi
   ensure_net_spool_dir
   local base url outfile statusfile tmp delay_ms key device_label
-  base="$(api_base_url "$id")"
+  base="$(api_base_url "$id" || true)"
+  [[ -n "$base" ]] || return 0
   key=$(net_key "$id")
   device_label=$(device_display_name "$id")
   outfile=$(net_data_path "$id" "presets")
@@ -497,11 +503,12 @@ start_patch_send() {
   local id=$1 payload=$2
   if ! device_has_endpoint "$id"; then
     log_debug "net skip invalid_device_id=${id:-} type=patch"
-    return 1
+    return 0
   fi
   ensure_net_spool_dir
   local url delay_ms statusfile
-  url="$(api_base_url "$id")/json/state"
+  url="$(api_base_url "$id" || true)/json/state"
+  [[ "$url" != "/json/state" ]] || return 0
   statusfile=$(net_status_path "$id" "patch")
   delay_ms=${WLEDTUI_NET_DELAY_MS:-0}
   if [[ "${WLEDTUI_ASYNC_DRY_RUN:-}" == "1" ]]; then
@@ -1053,14 +1060,15 @@ start_discover_scan() {
   delay_ms=${WLEDTUI_NET_DELAY_MS:-0}
   (
     sleep_ms "$delay_ms"
-    local exit_code=0
-    if discover_devices_report > "$tmp" 2>/dev/null; then
+    local scan_status=0
+    discover_devices_report > "$tmp" 2>/dev/null || scan_status=$?
+    if [[ -f "$tmp" ]]; then
       mv "$tmp" "$outfile"
-    else
-      exit_code=$?
-      rm -f "$tmp"
     fi
-    printf '%s %s\n' "$exit_code" "$(now_ts)" > "$statusfile"
+    log_debug "discover_devices finished status=${scan_status}"
+    model_save_devices || log_debug "model_save_devices failed status=$?"
+    printf '0 %s\n' "$(now_ts)" > "$statusfile"
+    exit 0
   ) &
   DISCOVER_INFLIGHT_PID=$!
 }
@@ -1116,19 +1124,24 @@ process_discover_results() {
       UI_BUSY_SCAN=0
       UI_DIRTY=1
     fi
-  else
-    if (( UI_BUSY_SCAN )); then
-      UI_BUSY_SCAN=0
-      set_modal_error "Scan failed."
-    fi
   fi
   if [[ -n "$DISCOVER_INFLIGHT_PID" ]]; then
     if ! kill -0 "$DISCOVER_INFLIGHT_PID" 2>/dev/null; then
-      wait "$DISCOVER_INFLIGHT_PID" 2>/dev/null || true
+      local scan_status=0
+      if wait "$DISCOVER_INFLIGHT_PID" 2>/dev/null; then
+        scan_status=0
+      else
+        scan_status=$?
+      fi
+      log_debug "scan complete pid=${DISCOVER_INFLIGHT_PID} status=${scan_status}"
       DISCOVER_INFLIGHT_PID=""
+      UI_BUSY_SCAN=0
+      DISCOVER_REQUESTED=0
+      clamp_selected_device_index
+      UI_DIRTY=1
+      DEVICE_LIST_DIRTY=1
     fi
   fi
-  DISCOVER_REQUESTED=0
 }
 
 on_selected_device_changed() {
@@ -1192,15 +1205,11 @@ apply_state_payload() {
 }
 
 current_device_id() {
+  clamp_selected_device_index
   if (( ${#DEVICE_IDS[@]} == 0 )); then
-    printf ''
-    return
+    return 0
   fi
-  if (( SELECTED_DEVICE_INDEX < 0 || SELECTED_DEVICE_INDEX >= ${#DEVICE_IDS[@]} )); then
-    printf ''
-    return
-  fi
-  printf '%s' "${DEVICE_IDS[$SELECTED_DEVICE_INDEX]}"
+  printf '%s' "${DEVICE_IDS[$SELECTED_DEVICE_INDEX]:-}"
 }
 
 device_has_endpoint() {
