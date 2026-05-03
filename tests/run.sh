@@ -49,6 +49,11 @@ pass "interactive handlers no longer depend on jq-only payload builders"
 source ./lib/model.sh
 source ./lib/api.sh
 source ./lib/discover.sh
+
+if rg -n '\$wled([^A-Za-z0-9_]|$)|\$\{wled([^A-Za-z0-9_]|[:}])' ./wledtui ./lib; then
+  exit 1
+fi
+pass "no raw \$wled references remain in runtime code"
 tmp_cache=$(mktemp -d)
 CACHE_DIR="$tmp_cache"
 CACHE_FILE="$tmp_cache/devices.json"
@@ -100,6 +105,22 @@ DEV_WLED_NAME[$id2]=""
 DEV_NAME[$id2]=""
 [[ "$(device_display_name "$id2")" == "desk-strip.local:81" ]]
 pass "device_display_name preference chain remains alias>wled>mdns>host:port"
+
+discover_primary(){ :; }
+discover_secondary_verified(){ :; }
+discover_devices
+pass "discover_devices tolerates empty discovery results under set -u"
+
+discover_devices_report(){ printf 'svc|wled-missing.local|192.0.2.10|80|\n'; }
+discover_devices
+pass "discover_devices tolerates discovery entries missing info/name/mac/ip"
+
+id4=$(model_add_device "placeholder.local" "placeholder.local" 80 "192.0.2.11")
+DEV_WLED_NAME[$id4]="Friendly Name"
+DEV_MAC[$id4]="aa:bb:cc:dd:ee:ff"
+DEV_IP[$id4]="192.0.2.11"
+[[ "$(device_display_name "$id4")" == "Friendly Name" ]]
+pass "device_display_name uses friendly WLED info name when available"
 
 if rg -n -- ' -- .* -o ' wledtui lib >/tmp/bad_curl.txt; then
   cat /tmp/bad_curl.txt
