@@ -74,15 +74,62 @@ device_id() {
   printf '%s:%s' "$host" "$port"
 }
 
+model_find_existing_device() {
+  local name=$1 host=$2 addr=${3:-} port=$4
+  local id
+
+  # 1) Same host:port
+  id=$(device_id "$host" "$port")
+  if [[ -n "${DEV_HOST[$id]:-}" ]]; then
+    printf '%s' "$id"
+    return
+  fi
+
+  # 2) Same stored ip:port
+  if [[ -n "$addr" ]]; then
+    for id in "${DEVICE_IDS[@]}"; do
+      [[ "${DEV_PORT[$id]:-}" == "$port" ]] || continue
+      [[ "${DEV_IP[$id]:-}" == "$addr" ]] || continue
+      printf '%s' "$id"
+      return
+    done
+  fi
+
+  # 3) Same WLED name + port
+  if [[ -n "$name" ]]; then
+    for id in "${DEVICE_IDS[@]}"; do
+      [[ "${DEV_PORT[$id]:-}" == "$port" ]] || continue
+      [[ "${DEV_WLED_NAME[$id]:-}" == "$name" ]] || continue
+      printf '%s' "$id"
+      return
+    done
+  fi
+
+  # 4) Same mDNS/service name + port
+  if [[ -n "$name" ]]; then
+    for id in "${DEVICE_IDS[@]}"; do
+      [[ "${DEV_PORT[$id]:-}" == "$port" ]] || continue
+      [[ "${DEV_NAME[$id]:-}" == "$name" ]] || continue
+      printf '%s' "$id"
+      return
+    done
+  fi
+}
+
 model_add_device() {
   local name=$1 host=$2 port=$3 ip=${4:-}
-  local id
+  local id existing_id
   # Security: reject unsafe host/port values from user, cache, or network discovery.
   if ! is_valid_host "$host" || ! is_valid_port "$port"; then
     log_debug "Rejected device with unsafe host/port host=${host} port=${port}"
     return 1
   fi
-  id=$(device_id "$host" "$port")
+  existing_id=$(model_find_existing_device "$name" "$host" "$ip" "$port")
+  if [[ -n "$existing_id" ]]; then
+    id="$existing_id"
+  else
+    id=$(device_id "$host" "$port")
+  fi
   local existing_alias=${DEV_ALIAS[$id]:-}
   local existing_wled=${DEV_WLED_NAME[$id]:-}
   local existing_name=${DEV_NAME[$id]:-}
@@ -91,7 +138,7 @@ model_add_device() {
   if [[ -z "${DEV_HOST[$id]:-}" ]]; then
     DEVICE_IDS+=("$id")
   fi
-  if [[ -n "$name" ]]; then
+  if [[ -n "$name" && -z "$existing_wled" ]]; then
     DEV_NAME[$id]="$name"
   else
     DEV_NAME[$id]="$existing_name"

@@ -47,6 +47,7 @@ rg -n 'build_bri_payload|build_segment_color_payload|build_segment_scalar_payloa
 pass "interactive handlers no longer depend on jq-only payload builders"
 
 source ./lib/model.sh
+source ./lib/api.sh
 tmp_cache=$(mktemp -d)
 CACHE_DIR="$tmp_cache"
 CACHE_FILE="$tmp_cache/devices.json"
@@ -58,5 +59,45 @@ DEV_LAST_SEEN['h2:81']=2
 model_save_devices
 jq -e '.devices|length==2' "$CACHE_FILE" >/dev/null
 pass "model_save_devices writes valid multi-device JSON in one save"
+
+DEVICE_IDS=()
+unset DEV_NAME DEV_ALIAS DEV_WLED_NAME DEV_HOST DEV_PORT DEV_IP
+declare -A DEV_NAME=() DEV_ALIAS=() DEV_WLED_NAME=() DEV_HOST=() DEV_PORT=() DEV_IP=()
+
+model_add_device "pretty-1.local" "pretty-1.local" 80 "10.0.0.10"
+id="pretty-1.local:80"
+DEV_ALIAS[$id]="Kitchen"
+model_add_device "wled-a1b2c3.local" "10.0.0.10" 80 "10.0.0.10"
+[[ "$(device_display_name "$id")" == "Kitchen" ]]
+pass "alias is preserved across rediscovery by generated mdns/ip"
+
+model_add_device "Desk Strip" "desk-strip.local" 80 "10.0.0.11"
+id2="desk-strip.local:80"
+DEV_WLED_NAME[$id2]="Desk Strip"
+model_add_device "wled-xyz.local" "10.0.0.11" 80 "10.0.0.11"
+[[ "$(device_display_name "$id2")" == "Desk Strip" ]]
+pass "wled name is preserved across rediscovery by ip"
+
+before_count=${#DEVICE_IDS[@]}
+model_add_device "wled-rand-2.local" "wled-rand-2.local" 80 "10.0.0.11"
+after_count=${#DEVICE_IDS[@]}
+[[ "$before_count" -eq "$after_count" ]]
+pass "same ip rediscovery with different mdns does not duplicate device"
+
+DEV_IP[$id2]="10.0.0.22"
+DEV_HOST[$id2]="desk-strip.local"
+DEV_PORT[$id2]="81"
+[[ "$(api_base_url "$id2")" == "http://10.0.0.22:81" ]]
+pass "api_base_url prefers DEV_IP when present"
+
+DEV_ALIAS[$id2]=""
+DEV_WLED_NAME[$id2]="Desk Strip"
+DEV_NAME[$id2]="mdns-name"
+[[ "$(device_display_name "$id2")" == "Desk Strip" ]]
+DEV_WLED_NAME[$id2]=""
+[[ "$(device_display_name "$id2")" == "mdns-name" ]]
+DEV_NAME[$id2]=""
+[[ "$(device_display_name "$id2")" == "desk-strip.local:81" ]]
+pass "device_display_name preference chain remains alias>wled>mdns>host:port"
 
 echo "ALL TESTS PASSED"
