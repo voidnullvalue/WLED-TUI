@@ -238,3 +238,34 @@ refresh_rc=$?
 set -e
 [[ $refresh_rc -eq 0 ]]
 pass "refresh path with no devices does not call api_base_url"
+
+# scheduler skip must be non-fatal under set -e
+DEVICE_IDS=("missing-endpoint:80")
+set +e
+schedule_state_fetch "missing-endpoint:80"
+rc_sched=$?
+set -e
+[[ $rc_sched -eq 0 ]]
+pass "schedule_state_fetch missing endpoint is non-fatal skip"
+
+# discovery canonical id and pretty-name preservation via MAC match
+DEVICE_IDS=()
+declare -A DEV_NAME=() DEV_ALIAS=() DEV_WLED_NAME=() DEV_LAST_GOOD_WLED_NAME=() DEV_HOST=() DEV_PORT=() DEV_IP=() DEV_MAC=() DEV_LAST_SEEN=()
+declare -A DEV_INFO_JSON=() DEV_INFO_TS=() DEV_INFO_STALE=() DEV_VER=() DEV_WIFI=() DEV_UPTIME=() DEV_LIVE=()
+declare -A DEV_GET_STATE_INFLIGHT_PID=() DEV_GET_INFO_INFLIGHT_PID=() DEV_GET_PRESETS_INFLIGHT_PID=() DEV_GET_EFFECTS_INFLIGHT_PID=() DEV_GET_PALETTES_INFLIGHT_PID=()
+model_add_device "Living Room" "old-host.local" 80 "192.168.88.46" "e8f60a1dcb2c" >/dev/null
+existing_id="old-host.local:80"
+DEV_ALIAS[$existing_id]="Living Alias"
+DEV_WLED_NAME[$existing_id]="Living Room"
+DEV_LAST_GOOD_WLED_NAME[$existing_id]="Living Room"
+add_id=$(model_add_device "wled-1dcb2c.local" "wled-1dcb2c.local" 80 "192.168.88.46" "e8f60a1dcb2c")
+[[ "$add_id" == "$existing_id" && ${#DEVICE_IDS[@]} -eq 1 ]]
+apply_info_response "$add_id" '{"name":"wled-1dcb2c.local","mac":"e8f60a1dcb2c","ip":"192.168.88.46","ver":"0.15.0"}'
+[[ -n "${DEV_HOST[$existing_id]:-}" && -n "${DEV_PORT[$existing_id]:-}" && "${DEV_IP[$existing_id]:-}" == "192.168.88.46" ]]
+[[ "$(device_display_name "$existing_id")" == "Living Alias" ]]
+set +e
+schedule_state_fetch "$existing_id"
+rc_sched2=$?
+set -e
+[[ $rc_sched2 -eq 0 ]]
+pass "canonical discovery id keeps endpoint and pretty name while scheduling remains non-fatal"
