@@ -114,6 +114,19 @@ SEGMENTS_ROW_NORMAL=()
 SEGMENTS_ROW_SELECTED=()
 SEGMENT_TEXT=()
 SEGMENT_PRIMARY_COLOR=()
+SEG_R=()
+SEG_G=()
+SEG_B=()
+SEG_W=()
+SEG_HAS_W=()
+
+interactive_tt_value(){ printf '%s' "${WLEDTUI_INTERACTIVE_TT:-0}"; }
+build_bri_payload(){ printf '{"bri":%s,"tt":%s}' "$1" "$(interactive_tt_value)"; }
+build_transition_payload(){ printf '{"transition":%s}' "$1"; }
+build_on_payload(){ printf '{"on":%s}' "$1"; }
+build_nightlight_payload(){ printf '{"nl":{"on":%s}}' "$1"; }
+build_segment_scalar_payload(){ local id=$1 key=$2 value=$3 apply_all=$4; if ((apply_all)); then printf '{"seg":[{"id":%s,"%s":%s,"tt":%s}],"applyAll":true}' "$id" "$key" "$value" "$(interactive_tt_value)"; else printf '{"seg":[{"id":%s,"%s":%s,"tt":%s}]}' "$id" "$key" "$value" "$(interactive_tt_value)"; fi; }
+build_segment_color_payload(){ local id=$1 r=$2 g=$3 b=$4 w=${5:-} apply_all=$6 col; if [[ -n "$w" ]]; then col="[$r,$g,$b,$w]"; else col="[$r,$g,$b]"; fi; if ((apply_all)); then printf '{"seg":[{"id":%s,"col":[%s],"tt":%s}],"applyAll":true}' "$id" "$col" "$(interactive_tt_value)"; else printf '{"seg":[{"id":%s,"col":[%s],"tt":%s}]}' "$id" "$col" "$(interactive_tt_value)"; fi; }
 
 LEFT_CACHE_WIDTH=0
 RIGHT_CACHE_WIDTH=0
@@ -2243,7 +2256,7 @@ handle_left() {
       bri=$(clamp "$bri" 0 255)
       DEV_UI_BRI[$id]="$bri"
       DEV_DESIRED_BRI[$id]="$bri"
-      enqueue_patch "$id" "$(jq -n --argjson bri "$bri" '{bri:$bri}')"
+      enqueue_patch "$id" "$(build_bri_payload "$bri")"
       DEVICE_LIST_DIRTY=1
       ;;
     5)
@@ -2252,7 +2265,7 @@ handle_left() {
       transition=$((transition-1))
       transition=$(clamp "$transition" 0 255)
       DEV_DESIRED_TRANSITION[$id]="$transition"
-      enqueue_patch "$id" "$(jq -n --argjson transition "$transition" '{transition:$transition}')"
+      enqueue_patch "$id" "$(build_transition_payload "$transition")"
       ;;
     2)
       local seg=${SEGMENTS[$SEGMENT_INDEX]}
@@ -2326,7 +2339,7 @@ handle_right() {
       bri=$(clamp "$bri" 0 255)
       DEV_UI_BRI[$id]="$bri"
       DEV_DESIRED_BRI[$id]="$bri"
-      enqueue_patch "$id" "$(jq -n --argjson bri "$bri" '{bri:$bri}')"
+      enqueue_patch "$id" "$(build_bri_payload "$bri")"
       DEVICE_LIST_DIRTY=1
       ;;
     5)
@@ -2335,7 +2348,7 @@ handle_right() {
       transition=$((transition+1))
       transition=$(clamp "$transition" 0 255)
       DEV_DESIRED_TRANSITION[$id]="$transition"
-      enqueue_patch "$id" "$(jq -n --argjson transition "$transition" '{transition:$transition}')"
+      enqueue_patch "$id" "$(build_transition_payload "$transition")"
       ;;
     2)
       local seg=${SEGMENTS[$SEGMENT_INDEX]}
@@ -2411,7 +2424,7 @@ handle_enter() {
         new_on=true
       fi
       DEV_DESIRED_ON[$id]="$new_on"
-      enqueue_patch "$id" "$(jq -n --argjson on "$new_on" '{on:$on}')"
+      enqueue_patch "$id" "$(build_on_payload "$new_on")"
       DEVICE_LIST_DIRTY=1
       ;;
     1)
@@ -2500,7 +2513,7 @@ handle_enter() {
         new_on=true
       fi
       DEV_DESIRED_NL_ON[$id]="$new_on"
-      enqueue_patch "$id" "$(jq -n --argjson on "$new_on" '{nl:{on:$on}}')"
+      enqueue_patch "$id" "$(build_nightlight_payload "$new_on")"
       ;;
   esac
 }
@@ -2618,7 +2631,7 @@ smoke_test_brightness_repeat() {
     local bri=$(( (i * BRI_STEP) % 256 ))
     DEV_UI_BRI[$id]="$bri"
     DEV_DESIRED_BRI[$id]="$bri"
-    enqueue_patch "$id" "$(jq -n --argjson bri "$bri" '{bri:$bri}')"
+    enqueue_patch "$id" "$(build_bri_payload "$bri")"
     process_network_queue
   done
   end_ms=$(now_ms)

@@ -30,4 +30,33 @@ pactual=$(parse_presets_tsv <<<'{"1":{"n":"A"},"3":{"n":"B"}}')
 [[ "$pactual" == $'1\tA\n3\tB' ]]
 pass "preset object parser"
 
+rg -n 'build_bri_payload\(\)\{ printf '\''\{"bri":%s,"tt":%s\}'\''' wledtui >/dev/null
+pass "brightness payload helper exists with default tt support"
+
+rg -n 'interactive_tt_value\(\)\{ printf '\''%s'\'' "\$\{WLEDTUI_INTERACTIVE_TT:-0\}"; \}' wledtui >/dev/null
+pass "interactive tt override env supported"
+
+rg -n 'build_segment_color_payload' wledtui >/dev/null
+rg -n '\$r,\$g,\$b,\$w' wledtui >/dev/null
+pass "rgbw payload builder preserves white channel"
+
+rg -n 'model_add_device "\$name" "\$host" "\$port" "\$addr"' lib/discover.sh >/dev/null
+pass "discover devices passes addr into model_add_device"
+
+rg -n 'build_bri_payload|build_segment_color_payload|build_segment_scalar_payload' wledtui >/dev/null
+pass "interactive handlers no longer depend on jq-only payload builders"
+
+source ./lib/model.sh
+tmp_cache=$(mktemp -d)
+CACHE_DIR="$tmp_cache"
+CACHE_FILE="$tmp_cache/devices.json"
+CACHE_LOCK="$tmp_cache/devices.lock"
+model_add_device a h1 80 10.0.0.1
+model_add_device b h2 81 10.0.0.2
+DEV_LAST_SEEN['h1:80']=1
+DEV_LAST_SEEN['h2:81']=2
+model_save_devices
+jq -e '.devices|length==2' "$CACHE_FILE" >/dev/null
+pass "model_save_devices writes valid multi-device JSON in one save"
+
 echo "ALL TESTS PASSED"

@@ -102,3 +102,10 @@ Use the same key labels as the footer legend:
 ## Limitations
 - Discovery relies on Avahi; without it, devices must be added manually.
 - Only the WLED JSON HTTP API is supported (`/json/state`, `/json/info`, `/json/eff`, `/json/pal`, `/presets.json`/`/json/presets`).
+
+## Performance notes
+- Interactive changes are optimistic and coalesced before network send.
+- Selected devices are polled more frequently than unselected devices.
+- `WLEDTUI_INTERACTIVE_TT` overrides the default `tt:0` used for interactive payloads.
+- Device cache saves are debounced via `WLEDTUI_MODEL_SAVE_DEBOUNCE_MS` (default `2000`).
+- Fallback `_http._tcp` discovery probing is concurrent and capped by `WLEDTUI_DISCOVERY_CONCURRENCY` (default `8`).

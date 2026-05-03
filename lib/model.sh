@@ -54,6 +54,20 @@ declare -A DEV_EFFECTS_TS=()
 declare -A DEV_PALETTES_JSON=()
 declare -A DEV_STATE_TS=()
 declare -A DEV_STATE_STALE=()
+MODEL_DIRTY_FLAG=0
+MODEL_LAST_SAVE_MS=0
+MODEL_SAVE_DEBOUNCE_MS=${WLEDTUI_MODEL_SAVE_DEBOUNCE_MS:-2000}
+
+model_mark_dirty() { MODEL_DIRTY_FLAG=1; }
+
+model_maybe_save() {
+  local now=${1:-$(now_ms)}
+  (( MODEL_DIRTY_FLAG )) || return
+  if (( now - MODEL_LAST_SAVE_MS < MODEL_SAVE_DEBOUNCE_MS )); then
+    return
+  fi
+  model_save_devices
+}
 
 device_id() {
   local host=$1 port=$2
@@ -187,22 +201,13 @@ model_load_devices() {
   if [[ ! -f "$CACHE_FILE" ]]; then
     return
   fi
-  jq -c '.devices[]?' "$CACHE_FILE" 2>/dev/null | while IFS= read -r dev; do
-    local name host port ip last_seen id alias wled_name state state_ts
-    name=$(jq -r '.mdns_name // .name // ""' <<<"$dev")
-    alias=$(jq -r '.alias // ""' <<<"$dev")
-    wled_name=$(jq -r '.wled_name // ""' <<<"$dev")
-    host=$(jq -r '.host' <<<"$dev")
-    ip=$(jq -r '.ip // ""' <<<"$dev")
-    port=$(jq -r '.port' <<<"$dev")
+  jq -rc '.devices[]? | [(.mdns_name // .name // ""),(.alias // ""),(.wled_name // ""),.host,(.ip // ""),(.port|tostring),(.last_seen // 0|tostring),(.state_ts // 0|tostring),(.state // null | @json)] | @tsv' "$CACHE_FILE" 2>/dev/null | while IFS=$'\t' read -r name alias wled_name host ip port last_seen state_ts state; do
+    local id
     # Security: skip cached entries with unsafe host/port values.
     if ! is_valid_host "$host" || ! is_valid_port "$port"; then
       log_debug "Skipping cached device with unsafe host/port host=${host} port=${port}"
       continue
     fi
-    last_seen=$(jq -r '.last_seen // 0' <<<"$dev")
-    state=$(jq -c '.state // empty' <<<"$dev" 2>/dev/null || true)
-    state_ts=$(jq -r '.state_ts // 0' <<<"$dev" 2>/dev/null || printf '0')
     id=$(device_id "$host" "$port")
     # Security: ensure only validated devices are loaded into memory.
     if ! model_add_device "$name" "$host" "$port" "$ip"; then
@@ -212,7 +217,7 @@ model_load_devices() {
     DEV_WLED_NAME[$id]="$wled_name"
     DEV_LAST_SEEN[$id]="$last_seen"
     DEV_STATE_TS[$id]="$state_ts"
-    if [[ -n "$state" ]] && jq -e '.' <<<"$state" >/dev/null 2>&1; then
+    if [[ "$state" != "null" ]] && jq -e '.' <<<"$state" >/dev/null 2>&1; then
       DEV_STATE_JSON[$id]="$state"
       DEV_BRI[$id]=$(jq -r '.bri // 0' <<<"$state")
       DEV_ON[$id]=$(jq -r '.on // false' <<<"$state")
@@ -227,34 +232,18 @@ model_load_devices() {
 
 model_save_devices() {
   ensure_cache_dir
-  local json
-  json=$(jq -n '{devices: []}')
+  local rows=() id state_json state_ts
   for id in "${DEVICE_IDS[@]}"; do
-    local state_json="${DEV_STATE_JSON[$id]:-}"
-    local state_ts="${DEV_STATE_TS[$id]:-0}"
-    if [[ -n "$state_json" ]] && jq -e '.' <<<"$state_json" >/dev/null 2>&1; then
-      json=$(jq -c --arg name "${DEV_NAME[$id]}" \
-        --arg alias "${DEV_ALIAS[$id]:-}" \
-        --arg wled_name "${DEV_WLED_NAME[$id]:-}" \
-        --arg host "${DEV_HOST[$id]}" \
-        --arg ip "${DEV_IP[$id]:-}" \
-        --arg port "${DEV_PORT[$id]}" \
-        --argjson last_seen "${DEV_LAST_SEEN[$id]}" \
-        --argjson state "$state_json" \
-        --argjson state_ts "$state_ts" \
-        '.devices += [{name:$name,mdns_name:$name,alias:$alias,wled_name:$wled_name,host:$host,ip:$ip,port:($port|tonumber),last_seen:$last_seen,state:$state,state_ts:$state_ts}]' <<<"$json")
-    else
-      json=$(jq -c --arg name "${DEV_NAME[$id]}" \
-        --arg alias "${DEV_ALIAS[$id]:-}" \
-        --arg wled_name "${DEV_WLED_NAME[$id]:-}" \
-        --arg host "${DEV_HOST[$id]}" \
-        --arg ip "${DEV_IP[$id]:-}" \
-        --arg port "${DEV_PORT[$id]}" \
-        --argjson last_seen "${DEV_LAST_SEEN[$id]}" \
-        --argjson state_ts "$state_ts" \
-        '.devices += [{name:$name,mdns_name:$name,alias:$alias,wled_name:$wled_name,host:$host,ip:$ip,port:($port|tonumber),last_seen:$last_seen,state:null,state_ts:$state_ts}]' <<<"$json")
-    fi
+    state_json="${DEV_STATE_JSON[$id]:-null}"
+    state_ts="${DEV_STATE_TS[$id]:-0}"
+    rows+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "${DEV_NAME[$id]}" "${DEV_ALIAS[$id]:-}" "${DEV_WLED_NAME[$id]:-}" "${DEV_HOST[$id]}" "${DEV_IP[$id]:-}" "${DEV_PORT[$id]}" "${DEV_LAST_SEEN[$id]:-0}" "$state_ts" "$state_json")")
   done
+  local json='{"devices":[]}'
+  if (( ${#rows[@]} > 0 )); then
+    json=$(printf '%s\n' "${rows[@]}" | jq -Rsc 'split("\n")|map(select(length>0)|split("\t"))|{devices: map({name:.[0],mdns_name:.[0],alias:.[1],wled_name:.[2],host:.[3],ip:.[4],port:(.[5]|tonumber),last_seen:(.[6]|tonumber),state_ts:(.[7]|tonumber),state:(.[8]|fromjson?)})}')
+  fi
   # Security: write cache without invoking a shell.
   with_lock "$CACHE_LOCK" write_file "$json" "$CACHE_FILE"
+  MODEL_DIRTY_FLAG=0
+  MODEL_LAST_SAVE_MS=$(now_ms)
 }

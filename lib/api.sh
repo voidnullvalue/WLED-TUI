@@ -10,7 +10,8 @@ API_MAX_TIME=2
 
 api_base_url() {
   local id=$1
-  printf 'http://%s:%s' "${DEV_HOST[$id]}" "${DEV_PORT[$id]}"
+  local endpoint="${DEV_IP[$id]:-${DEV_HOST[$id]}}"
+  printf 'http://%s:%s' "$endpoint" "${DEV_PORT[$id]}"
 }
 
 api_request() {
