@@ -1078,7 +1078,6 @@ start_discover_scan() {
       mv "$tmp" "$outfile"
     fi
     log_debug "discover_devices finished status=${scan_status}"
-    model_save_devices || log_debug "model_save_devices failed status=$?"
     printf '0 %s\n' "$(now_ts)" > "$statusfile"
     exit 0
   ) &
@@ -1110,23 +1109,36 @@ process_discover_results() {
         log_debug "Skipping malformed discovery entry: ${entry}"
         continue
       fi
-    IFS=$'\t' read -r name host addr port info_json <<<"$parsed"
+      IFS=$'\t' read -r name host addr port info_json <<<"$parsed"
       local wled_name="" mac="" info_ip=""
-      wled_name=$(jq -r '.name // ""' <<<"$info_json" 2>/dev/null || true)
-      mac=$(jq -r '.mac // ""' <<<"$info_json" 2>/dev/null || true)
-      info_ip=$(jq -r '.ip // ""' <<<"$info_json" 2>/dev/null || true)
+      if jq -e . >/dev/null 2>&1 <<<"$info_json"; then
+        wled_name=$(jq -r '.name // ""' <<<"$info_json" 2>/dev/null || true)
+        mac=$(jq -r '.mac // ""' <<<"$info_json" 2>/dev/null || true)
+        info_ip=$(jq -r '.ip // ""' <<<"$info_json" 2>/dev/null || true)
+      else
+        mac=$(sed -nE 's/.*(^|[;"[:space:]])mac=([0-9A-Fa-f:]{12,17}).*/\2/p' <<<"$info_json" | head -n1 || true)
+        mac=${mac//\"/}
+      fi
       [[ -n "$wled_name" && "$wled_name" != "null" ]] && name="$wled_name"
       local add_ip="$addr"
       [[ -n "$info_ip" && "$info_ip" != "null" ]] && add_ip="$info_ip"
-      local id
-      if ! id=$(model_add_device "$name" "$host" "$port" "$add_ip" "$mac"); then
+      local canonical_id
+      canonical_id=$(model_add_device "$name" "$host" "$port" "$add_ip" "$mac" 2>/dev/null || true)
+      if [[ -z "$canonical_id" ]]; then
+        log_debug "scan merge skip raw_host=${host} raw_ip=${addr} raw_port=${port} raw_mac=${mac} reason=empty_canonical_id"
         continue
       fi
-      DEV_LAST_SEEN[$id]="$now"
-      apply_info_response "$id" "$info_json"
-      schedule_state_fetch "$id"
-      schedule_info_fetch "$id"
-      schedule_presets_fetch "$id"
+      log_debug "scan merge raw_host=${host} raw_ip=${addr} raw_port=${port} raw_mac=${mac} canonical_id=${canonical_id}"
+      DEV_LAST_SEEN[$canonical_id]="$now"
+      if jq -e . >/dev/null 2>&1 <<<"$info_json"; then
+        apply_info_response "$canonical_id" "$info_json"
+      elif [[ -n "$mac" ]]; then
+        DEV_MAC[$canonical_id]="$mac"
+      fi
+      log_debug "scan merge scheduling canonical_id=${canonical_id} has_host=${DEV_HOST[$canonical_id]:-} has_port=${DEV_PORT[$canonical_id]:-}"
+      schedule_state_fetch "$canonical_id"
+      schedule_info_fetch "$canonical_id"
+      schedule_presets_fetch "$canonical_id"
     done < "$outfile"
     clamp_selected_device_index
     DEVICE_LIST_DIRTY=1
