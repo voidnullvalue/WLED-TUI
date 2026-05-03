@@ -23,12 +23,12 @@ ui_init() {
     UI_SEL_ON=$(tput smso)
   fi
   render_init
-  stty -echo
+  [[ -t 0 ]] && stty -echo
   trap 'ui_restore' EXIT INT TERM
 }
 
 ui_restore() {
-  stty echo
+  [[ -t 0 ]] && stty echo
   render_shutdown
 }
 
