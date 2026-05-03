@@ -733,8 +733,20 @@ apply_info_response() {
     DEV_INFO_STALE[$id]="1"
     return
   fi
+
+  local host=${DEV_HOST[$id]:-} port=${DEV_PORT[$id]:-} mac ip canonical_id
+  mac=$(jq -r '.mac // ""' <<<"$normalized")
+  ip=$(jq -r '.ip // ""' <<<"$normalized")
+  if [[ -n "$host" ]] && is_valid_port "${port:-}"; then
+    canonical_id=$(model_add_device "${DEV_NAME[$id]:-$host}" "$host" "$port" "$ip" "$mac" 2>/dev/null || true)
+    if [[ -n "$canonical_id" ]]; then
+      id="$canonical_id"
+    fi
+  fi
+
   apply_info_fields_from_json "$id" "$normalized"
   DEV_INFO_TS[$id]=$(now_ts)
+  DEV_LAST_SEEN[$id]=$(now_ts)
   MODEL_DIRTY=1
 }
 
@@ -766,13 +778,13 @@ schedule_state_fetch() {
   [[ -z "$id" ]] && return
   if ! device_has_endpoint "$id"; then
     log_debug "net skip invalid_device_id=${id:-} type=state"
-    return 1
+    return 0
   fi
   if [[ -n "${DEV_GET_STATE_INFLIGHT_PID[$id]:-}" ]]; then
     return
   fi
   DEV_GET_STATE_INFLIGHT_PID[$id]=$(start_get_request "$id" "state" "/json/state" || true)
-  [[ -n "${DEV_GET_STATE_INFLIGHT_PID[$id]:-}" ]] || return 1
+  [[ -n "${DEV_GET_STATE_INFLIGHT_PID[$id]:-}" ]] || return 0
 }
 
 schedule_info_fetch() {
@@ -780,13 +792,13 @@ schedule_info_fetch() {
   [[ -z "$id" ]] && return
   if ! device_has_endpoint "$id"; then
     log_debug "net skip invalid_device_id=${id:-} type=info"
-    return 1
+    return 0
   fi
   if [[ -n "${DEV_GET_INFO_INFLIGHT_PID[$id]:-}" ]]; then
     return
   fi
   DEV_GET_INFO_INFLIGHT_PID[$id]=$(start_get_request "$id" "info" "/json/info" || true)
-  [[ -n "${DEV_GET_INFO_INFLIGHT_PID[$id]:-}" ]] || return 1
+  [[ -n "${DEV_GET_INFO_INFLIGHT_PID[$id]:-}" ]] || return 0
 }
 
 schedule_presets_fetch() {
@@ -794,7 +806,7 @@ schedule_presets_fetch() {
   [[ -z "$id" ]] && return
   if ! device_has_endpoint "$id"; then
     log_debug "net skip invalid_device_id=${id:-} type=presets"
-    return 1
+    return 0
   fi
   if [[ -n "${DEV_GET_PRESETS_INFLIGHT_PID[$id]:-}" ]]; then
     return
@@ -803,7 +815,7 @@ schedule_presets_fetch() {
   DEV_PRESETS_CYCLE[$id]="$PRESETS_REFRESH_SEQ"
   preset_debug_log "$id" "schedule" "request=presets"
   DEV_GET_PRESETS_INFLIGHT_PID[$id]=$(start_presets_request "$id" || true)
-  [[ -n "${DEV_GET_PRESETS_INFLIGHT_PID[$id]:-}" ]] || return 1
+  [[ -n "${DEV_GET_PRESETS_INFLIGHT_PID[$id]:-}" ]] || return 0
 }
 
 schedule_effects_fetch() {
@@ -811,13 +823,13 @@ schedule_effects_fetch() {
   [[ -z "$id" ]] && return
   if ! device_has_endpoint "$id"; then
     log_debug "net skip invalid_device_id=${id:-} type=effects"
-    return 1
+    return 0
   fi
   if [[ -n "${DEV_GET_EFFECTS_INFLIGHT_PID[$id]:-}" ]]; then
     return
   fi
   DEV_GET_EFFECTS_INFLIGHT_PID[$id]=$(start_get_request "$id" "effects" "/json/eff" || true)
-  [[ -n "${DEV_GET_EFFECTS_INFLIGHT_PID[$id]:-}" ]] || return 1
+  [[ -n "${DEV_GET_EFFECTS_INFLIGHT_PID[$id]:-}" ]] || return 0
 }
 
 schedule_palettes_fetch() {
@@ -825,13 +837,13 @@ schedule_palettes_fetch() {
   [[ -z "$id" ]] && return
   if ! device_has_endpoint "$id"; then
     log_debug "net skip invalid_device_id=${id:-} type=palettes"
-    return 1
+    return 0
   fi
   if [[ -n "${DEV_GET_PALETTES_INFLIGHT_PID[$id]:-}" ]]; then
     return
   fi
   DEV_GET_PALETTES_INFLIGHT_PID[$id]=$(start_get_request "$id" "palettes" "/json/pal" || true)
-  [[ -n "${DEV_GET_PALETTES_INFLIGHT_PID[$id]:-}" ]] || return 1
+  [[ -n "${DEV_GET_PALETTES_INFLIGHT_PID[$id]:-}" ]] || return 0
 }
 
 enqueue_patch() {
