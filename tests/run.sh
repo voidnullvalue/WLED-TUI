@@ -115,7 +115,8 @@ discover_devices_report(){ printf 'svc|wled-missing.local|192.0.2.10|80|\n'; }
 discover_devices
 pass "discover_devices tolerates discovery entries missing info/name/mac/ip"
 
-id4=$(model_add_device "placeholder.local" "placeholder.local" 80 "192.0.2.11")
+model_add_device "placeholder.local" "placeholder.local" 80 "192.0.2.11" >/dev/null
+id4="$MODEL_ADD_DEVICE_ID"
 DEV_WLED_NAME[$id4]="Friendly Name"
 DEV_MAC[$id4]="aa:bb:cc:dd:ee:ff"
 DEV_IP[$id4]="192.0.2.11"
@@ -154,9 +155,10 @@ pass "fake curl enforces -o before -- and writes output file"
 
 echo "ALL TESTS PASSED"
 
-id_ret=$(model_add_device "Desk Strip" "desk-strip.local" 80 "10.0.0.11")
+model_add_device "Desk Strip" "desk-strip.local" 80 "10.0.0.11" >/dev/null
+id_ret="$MODEL_ADD_DEVICE_ID"
 [[ "$id_ret" == "$id2" ]]
-pass "model_add_device returns merged id"
+pass "model_add_device exposes merged id via MODEL_ADD_DEVICE_ID"
 
 DEV_STATE_JSON[$id2]='{"bri":128,"on":true,"ps":4}'
 DEV_INFO_JSON[$id2]='{"name":"Desk Strip","ver":"0.15"}'
@@ -249,6 +251,8 @@ set -e
 pass "schedule_state_fetch missing endpoint is non-fatal skip"
 
 # discovery canonical id and pretty-name preservation via MAC match
+unset -f api_base_url
+source ./lib/api.sh
 DEVICE_IDS=()
 declare -A DEV_NAME=() DEV_ALIAS=() DEV_WLED_NAME=() DEV_LAST_GOOD_WLED_NAME=() DEV_HOST=() DEV_PORT=() DEV_IP=() DEV_MAC=() DEV_LAST_SEEN=()
 declare -A DEV_INFO_JSON=() DEV_INFO_TS=() DEV_INFO_STALE=() DEV_VER=() DEV_WIFI=() DEV_UPTIME=() DEV_LIVE=()
@@ -258,7 +262,8 @@ existing_id="old-host.local:80"
 DEV_ALIAS[$existing_id]="Living Alias"
 DEV_WLED_NAME[$existing_id]="Living Room"
 DEV_LAST_GOOD_WLED_NAME[$existing_id]="Living Room"
-add_id=$(model_add_device "wled-1dcb2c.local" "wled-1dcb2c.local" 80 "192.168.88.46" "e8f60a1dcb2c")
+model_add_device "wled-1dcb2c.local" "wled-1dcb2c.local" 80 "192.168.88.46" "e8f60a1dcb2c" >/dev/null
+add_id="$MODEL_ADD_DEVICE_ID"
 [[ "$add_id" == "$existing_id" && ${#DEVICE_IDS[@]} -eq 1 ]]
 apply_info_response "$add_id" '{"name":"wled-1dcb2c.local","mac":"e8f60a1dcb2c","ip":"192.168.88.46","ver":"0.15.0"}'
 [[ -n "${DEV_HOST[$existing_id]:-}" && -n "${DEV_PORT[$existing_id]:-}" && "${DEV_IP[$existing_id]:-}" == "192.168.88.46" ]]
@@ -281,7 +286,8 @@ declare -a scheduled_ids=()
 schedule_state_fetch(){ scheduled_ids+=("state:$1"); return 0; }
 schedule_info_fetch(){ scheduled_ids+=("info:$1"); return 0; }
 schedule_presets_fetch(){ scheduled_ids+=("presets:$1"); return 0; }
-canonical_existing=$(model_add_device "Living Room" "living-room.local" 80 "192.168.88.40" "e8f60a1dcb2c")
+model_add_device "Living Room" "living-room.local" 80 "192.168.88.40" "e8f60a1dcb2c" >/dev/null
+canonical_existing="$MODEL_ADD_DEVICE_ID"
 DEV_ALIAS[$canonical_existing]="Living Alias"
 mkdir -p "$CACHE_DIR/net"
 cat > "$CACHE_DIR/net/discover.results" <<'EOF'
@@ -292,8 +298,32 @@ DISCOVER_REQUESTED=1
 process_discover_results
 [[ " ${DEVICE_IDS[*]} " == *" $canonical_existing "* ]]
 [[ -n "${DEV_HOST[$canonical_existing]:-}" && -n "${DEV_PORT[$canonical_existing]:-}" && -n "${DEV_IP[$canonical_existing]:-}" && -n "${DEV_MAC[$canonical_existing]:-}" ]]
-[[ " ${scheduled_ids[*]} " == *" state:$canonical_existing "* && " ${scheduled_ids[*]} " == *" info:$canonical_existing "* && " ${scheduled_ids[*]} " == *" presets:$canonical_existing "* ]]
-[[ " ${scheduled_ids[*]} " != *" wled-1dcb2c.local:80 "* ]]
+printf "%s
+" "${scheduled_ids[@]}" | rg -n "^state:${canonical_existing}$" >/dev/null
+printf "%s
+" "${scheduled_ids[@]}" | rg -n "^info:${canonical_existing}$" >/dev/null
+printf "%s
+" "${scheduled_ids[@]}" | rg -n "^presets:${canonical_existing}$" >/dev/null
+if printf "%s
+" "${scheduled_ids[@]}" | rg -n "wled-1dcb2c\.local:80" >/dev/null; then exit 1; fi
 [[ "$(device_display_name "$canonical_existing")" == "Living Alias" ]]
 [[ "${DEV_IP[$canonical_existing]:-}" == "192.168.88.46" && "${DEV_HOST[$canonical_existing]:-}" == "wled-1dcb2c.local" && "${DEV_PORT[$canonical_existing]:-}" == "80" ]]
 pass "process_discover_results schedules canonical id and preserves alias while updating endpoint/ip"
+
+model_add_device "wled-1dcb2c" "wled-1dcb2c.local" 80 "192.168.88.46" "e8f60a1dcb2c" >/dev/null
+subshell_fix_id="$MODEL_ADD_DEVICE_ID"
+[[ "${DEV_HOST[$subshell_fix_id]:-}" == "wled-1dcb2c.local" ]]
+[[ "${DEV_PORT[$subshell_fix_id]:-}" == "80" ]]
+[[ "${DEV_IP[$subshell_fix_id]:-}" == "192.168.88.46" ]]
+[[ "${DEV_MAC[$subshell_fix_id]:-}" == "e8f60a1dcb2c" ]]
+pass "model_add_device keeps mutations in current shell via MODEL_ADD_DEVICE_ID"
+
+id_subshell=$(model_add_device "bad-subshell" "bad-subshell.local" 80 "192.0.2.90" "")
+[[ -n "$id_subshell" ]]
+[[ -z "${DEV_HOST[$id_subshell]:-}" ]]
+pass "command substitution for model_add_device remains observable but must not be used in mutating runtime paths"
+
+if rg -n '^\s*[^#]*\$\(\s*model_add_device\b|^\s*[^#]*`\s*model_add_device\b' wledtui lib/*.sh; then
+  exit 1
+fi
+pass "runtime code avoids model_add_device command substitution"

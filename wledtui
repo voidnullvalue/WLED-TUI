@@ -738,7 +738,8 @@ apply_info_response() {
   mac=$(jq -r '.mac // ""' <<<"$normalized")
   ip=$(jq -r '.ip // ""' <<<"$normalized")
   if [[ -n "$host" ]] && is_valid_port "${port:-}"; then
-    canonical_id=$(model_add_device "${DEV_NAME[$id]:-$host}" "$host" "$port" "$ip" "$mac" 2>/dev/null || true)
+    model_add_device "${DEV_NAME[$id]:-$host}" "$host" "$port" "$ip" "$mac" >/dev/null 2>/dev/null || true
+    canonical_id="$MODEL_ADD_DEVICE_ID"
     if [[ -n "$canonical_id" ]]; then
       id="$canonical_id"
     fi
@@ -1123,7 +1124,8 @@ process_discover_results() {
       local add_ip="$addr"
       [[ -n "$info_ip" && "$info_ip" != "null" ]] && add_ip="$info_ip"
       local canonical_id
-      canonical_id=$(model_add_device "$name" "$host" "$port" "$add_ip" "$mac" 2>/dev/null || true)
+      model_add_device "$name" "$host" "$port" "$add_ip" "$mac" >/dev/null 2>/dev/null || true
+      canonical_id="$MODEL_ADD_DEVICE_ID"
       if [[ -z "$canonical_id" ]]; then
         log_debug "scan merge skip raw_host=${host} raw_ip=${addr} raw_port=${port} raw_mac=${mac} reason=empty_canonical_id"
         continue
@@ -1135,7 +1137,10 @@ process_discover_results() {
       elif [[ -n "$mac" ]]; then
         DEV_MAC[$canonical_id]="$mac"
       fi
-      log_debug "scan merge scheduling canonical_id=${canonical_id} has_host=${DEV_HOST[$canonical_id]:-} has_port=${DEV_PORT[$canonical_id]:-}"
+      log_debug "scan merge scheduling canonical_id=${canonical_id} has_host=${DEV_HOST[$canonical_id]:-} has_port=${DEV_PORT[$canonical_id]:-} has_ip=${DEV_IP[$canonical_id]:-} has_mac=${DEV_MAC[$canonical_id]:-}"
+      if [[ -z "${DEV_HOST[$canonical_id]:-}" || -z "${DEV_PORT[$canonical_id]:-}" ]]; then
+        log_debug "scan merge failed missing endpoint canonical_id=${canonical_id} has_host=${DEV_HOST[$canonical_id]:-} has_port=${DEV_PORT[$canonical_id]:-} has_ip=${DEV_IP[$canonical_id]:-} has_mac=${DEV_MAC[$canonical_id]:-}"
+      fi
       schedule_state_fetch "$canonical_id"
       schedule_info_fetch "$canonical_id"
       schedule_presets_fetch "$canonical_id"

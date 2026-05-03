@@ -61,6 +61,7 @@ declare -A DEV_STATE_STALE=()
 MODEL_DIRTY_FLAG=0
 MODEL_LAST_SAVE_MS=0
 MODEL_SAVE_DEBOUNCE_MS=${WLEDTUI_MODEL_SAVE_DEBOUNCE_MS:-2000}
+MODEL_ADD_DEVICE_ID=""
 
 model_mark_dirty() { MODEL_DIRTY_FLAG=1; }
 
@@ -164,6 +165,7 @@ model_init_device_runtime() {
 }
 
 model_add_device() {
+  MODEL_ADD_DEVICE_ID=""
   local name=$1 host=$2 port=$3 ip=${4:-} mac=${5:-}
   local id existing_id is_new=0
   if ! is_valid_host "$host" || ! is_valid_port "$port"; then
@@ -184,6 +186,7 @@ model_add_device() {
   DEV_HOST[$id]="$host"; DEV_PORT[$id]="$port"
   if [[ -n "$ip" ]]; then DEV_IP[$id]="$ip"; else DEV_IP[$id]="$existing_ip"; fi
   if (( is_new )); then model_init_device_runtime "$id"; fi
+  MODEL_ADD_DEVICE_ID="$id"
   printf '%s
 ' "$id"
 }
@@ -252,8 +255,8 @@ model_load_devices() {
   if [[ -f "$source" ]]; then
     jq -rc '.devices[]? | [(.mdns_name // .name // ""),(.alias // ""),(.wled_name // ""),(.last_good_wled_name // ""),(.preferred_name // ""),(.stable_id // ""),(.mac // ""),.host,(.ip // ""),(.port|tostring)] | @tsv' "$source" 2>/dev/null | while IFS=$'\t' read -r name alias wled_name last_good preferred stable_id mac host ip port; do
       if ! is_valid_host "$host" || ! is_valid_port "$port"; then continue; fi
-      model_add_device "$name" "$host" "$port" "$ip" "$mac" || continue
-      local id; id=$(model_find_existing_device "$name" "$host" "$ip" "$port" "$mac")
+      model_add_device "$name" "$host" "$port" "$ip" "$mac" >/dev/null || continue
+      local id; id="$MODEL_ADD_DEVICE_ID"
       DEV_ALIAS[$id]="$alias"; DEV_WLED_NAME[$id]="$wled_name"; DEV_LAST_GOOD_WLED_NAME[$id]="$last_good"; DEV_PREFERRED_NAME[$id]="$preferred"; DEV_STABLE_ID[$id]="${stable_id:-$id}"; DEV_MAC[$id]="$mac"
     done
   fi

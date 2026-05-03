@@ -124,10 +124,10 @@ discover_devices() {
     [[ -z "$parsed" ]] && continue
     IFS=$'\t' read -r name host addr port info <<<"$parsed"
     # Security: only add devices with validated host/port values.
-    local id
-    if ! id=$(model_add_device "$name" "$host" "$port" "$addr"); then
+    if ! model_add_device "$name" "$host" "$port" "$addr" >/dev/null; then
       continue
     fi
+    local id="$MODEL_ADD_DEVICE_ID"
     DEV_LAST_SEEN[$id]="$now"
   done < <(discover_devices_report)
   return 0
