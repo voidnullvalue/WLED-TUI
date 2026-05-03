@@ -9,17 +9,34 @@ API_CONNECT_TIMEOUT=1
 API_MAX_TIME=2
 
 api_base_url() {
-  local id=$1
-  local endpoint="${DEV_HOST[$id]}"
-  if [[ -n "${DEV_IP[$id]:-}" ]] && is_ip_literal "${DEV_IP[$id]}"; then endpoint="${DEV_IP[$id]}"; fi
-  printf 'http://%s:%s' "$endpoint" "${DEV_PORT[$id]}"
+  local id=${1:-}
+  local host="${DEV_HOST[$id]:-}"
+  local port="${DEV_PORT[$id]:-}"
+  local ip="${DEV_IP[$id]:-}"
+  local endpoint="$host"
+
+  [[ -n "$id" ]] || return 1
+  [[ -n "$host" ]] || return 1
+  [[ -n "$port" ]] || return 1
+  is_valid_port "$port" || return 1
+
+  if [[ -n "$ip" ]] && is_ip_literal "$ip"; then
+    endpoint="$ip"
+  fi
+  printf 'http://%s:%s' "$endpoint" "$port"
 }
 
 api_request() {
   local method=$1 id=$2 path=$3 payload=${4:-}
   local primary secondary url response exit_code
-  primary="$(api_base_url "$id")"
-  secondary="http://${DEV_HOST[$id]}:${DEV_PORT[$id]}"
+  local host="${DEV_HOST[$id]:-}"
+  local port="${DEV_PORT[$id]:-}"
+  primary="$(api_base_url "$id" || true)"
+  if [[ -z "$primary" ]]; then
+    log_debug "request_skipped invalid_device_id=${id:-}"
+    return 1
+  fi
+  secondary="http://${host}:${port}"
   for base in "$primary" "$secondary"; do
     [[ -z "$base" ]] && continue
     [[ "$base" == "$primary" || "$base" != "$primary" ]] || continue

@@ -178,3 +178,53 @@ model_load_devices
 id3="wled-a.local:80"
 [[ "$(device_display_name "$id3")" == "Kitchen Strip" && "${DEV_VER[$id3]}" == "0.15.0" && "${DEV_WIFI[$id3]}" == "88" && "${DEV_UPTIME[$id3]}" == "123" && "${DEV_MAC[$id3]}" == "aabbccddeeff" && "${DEV_IP[$id3]}" == "192.168.88.50" ]]
 pass "cached info hydration populates display/runtime info fields"
+
+set +e
+api_base_url "" >/dev/null 2>&1
+rc_empty=$?
+api_base_url "missing:80" >/dev/null 2>&1
+rc_missing=$?
+set -e
+[[ $rc_empty -ne 0 && $rc_missing -ne 0 ]]
+pass "api_base_url rejects empty or missing device id under set -u"
+
+DEV_HOST[$id2]="desk-strip.local"
+DEV_PORT[$id2]="81"
+DEV_IP[$id2]="10.0.0.22"
+[[ "$(api_base_url "$id2")" == "http://10.0.0.22:81" ]]
+DEV_IP[$id2]="not-an-ip"
+[[ "$(api_base_url "$id2")" == "http://desk-strip.local:81" ]]
+pass "api_base_url prefers literal ip else host"
+
+if rg -n 'local endpoint="\$\{DEV_HOST\[\$id\]\}"|"\$\{DEV_PORT\[\$id\]\}"' lib/api.sh; then
+  exit 1
+fi
+pass "api.sh avoids unsafe raw DEV_HOST/DEV_PORT deref in api_base_url"
+
+tmp_wled="./.wledtui_test_source.sh"
+awk '/^if \[\[ "\$\{1:-\}" == "--smoke" \]\]; then/{exit} {print}' ./wledtui > "$tmp_wled"
+source "$tmp_wled"
+rm -f "$tmp_wled"
+DEVICE_IDS=()
+SELECTED_DEVICE_INDEX=3
+[[ -z "$(current_device_id)" ]]
+pass "current_device_id returns empty when no devices/out-of-range"
+
+before_jobs=$(jobs -pr | wc -l | tr -d ' ')
+set +e
+start_get_request "missing:80" "state" "/json/state" >/dev/null
+bad_rc=$?
+set -e
+after_jobs=$(jobs -pr | wc -l | tr -d ' ')
+[[ $bad_rc -ne 0 && "$before_jobs" == "$after_jobs" ]]
+pass "start_get_request invalid id returns nonzero and creates no job"
+
+api_base_url(){ echo "SHOULD_NOT_RUN" >&2; return 99; }
+DEVICE_IDS=()
+SELECTED_DEVICE_INDEX=0
+set +e
+begin_busy_refresh "$(current_device_id)"
+refresh_rc=$?
+set -e
+[[ $refresh_rc -eq 0 ]]
+pass "refresh path with no devices does not call api_base_url"
