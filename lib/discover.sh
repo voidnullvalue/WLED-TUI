@@ -35,6 +35,35 @@ discover_secondary() {
   discover_parse_avahi '_http._tcp'
 }
 
+discover_secondary_verified() {
+  local concurrency=${WLEDTUI_DISCOVERY_CONCURRENCY:-8}
+  local -a entries=()
+  local -a pids=()
+  local -a files=()
+  local entry name host addr port out pid
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    entries+=("$entry")
+  done < <(discover_secondary)
+  for entry in "${entries[@]}"; do
+    IFS='|' read -r name host addr port <<<"$entry"
+    out=$(mktemp)
+    files+=("$out")
+    (api_probe_wled "$addr" "$port" >/dev/null 2>&1 && printf '%s\n' "$entry" > "$out") &
+    pid=$!
+    pids+=("$pid")
+    if (( ${#pids[@]} >= concurrency )); then
+      wait "${pids[0]}" 2>/dev/null || true
+      pids=("${pids[@]:1}")
+    fi
+  done
+  for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+  for out in "${files[@]}"; do
+    [[ -s "$out" ]] && cat "$out"
+    rm -f "$out"
+  done
+}
+
 discover_devices_report() {
   local found=()
   local entry name host addr port info
@@ -48,12 +77,8 @@ discover_devices_report() {
   if [[ ${#found[@]} -eq 0 ]]; then
     while IFS= read -r entry; do
       [[ -z "$entry" ]] && continue
-      IFS='|' read -r name host addr port <<<"$entry"
-      info=$(api_probe_wled "$addr" "$port" || true)
-      if [[ -n "$info" ]]; then
-        found+=("$name|$host|$addr|$port")
-      fi
-    done < <(discover_secondary)
+      found+=("$entry")
+    done < <(discover_secondary_verified)
   fi
 
   for entry in "${found[@]}"; do
@@ -91,7 +116,7 @@ discover_devices() {
     [[ -z "$parsed" ]] && continue
     IFS=$'\t' read -r name host addr port <<<"$parsed"
     # Security: only add devices with validated host/port values.
-    if ! model_add_device "$name" "$host" "$port"; then
+    if ! model_add_device "$name" "$host" "$port" "$addr"; then
       continue
     fi
     local id
