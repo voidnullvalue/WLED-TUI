@@ -437,7 +437,7 @@ start_presets_request() {
   events_file=$(net_events_path)
   tmp="${outfile}.tmp.$$"
   delay_ms=${WLEDTUI_NET_DELAY_MS:-0}
-  log_debug "net schedule device=${device_label} id=${id} key=${key} type=presets path=/json/presets url=$(sanitize_for_display "${base}/json/presets")"
+  log_debug "net schedule device=${device_label} id=${id} key=${key} type=presets path=/presets.json url=$(sanitize_for_display "${base}/presets.json")"
   (
     sleep_ms "$delay_ms"
     local exit_code=0 http_status="" bytes=0
@@ -447,14 +447,14 @@ start_presets_request() {
     # Security: use -- to terminate curl options so URL data cannot inject flags.
     http_status=$(curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
       --silent --show-error --fail --write-out '%{http_code}' \
-      -- "${base}/json/presets" -o "$tmp" 2>"$stderr_file")
+      -- "${base}/presets.json" -o "$tmp" 2>"$stderr_file")
     exit_code=$?
     if (( exit_code == 0 )); then
       mv "$tmp" "$outfile"
       bytes=$(wc -c < "$outfile" | tr -d ' ')
     elif http_status=$(curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
       --silent --show-error --fail --write-out '%{http_code}' \
-      -- "${base}/presets.json" -o "$tmp" 2>"$stderr_file"); then
+      -- "${base}/json/presets" -o "$tmp" 2>"$stderr_file"); then
       mv "$tmp" "$outfile"
       exit_code=0
       bytes=$(wc -c < "$outfile" | tr -d ' ')
@@ -465,31 +465,39 @@ start_presets_request() {
     stderr_snippet=$(sanitize_for_display "$(head -c 200 "$stderr_file" 2>/dev/null || true)")
     rm -f "$stderr_file"
     printf '%s %s %s %s\n' "$exit_code" "$(now_ts)" "${http_status:-}" "${bytes:-0}" > "$statusfile"
-    log_debug "net complete device=${device_label} id=${id} key=${key} type=presets path=/json/presets exit=${exit_code} http=${http_status:-} bytes=${bytes:-0} stderr=${stderr_snippet}"
+    log_debug "net complete device=${device_label} id=${id} key=${key} type=presets path=/presets.json exit=${exit_code} http=${http_status:-} bytes=${bytes:-0} stderr=${stderr_snippet}"
     printf '%s\t%s\n' "$id" "presets" >> "$events_file"
   ) &
-  log_debug "net dispatch device=${device_label} id=${id} key=${key} type=presets path=/json/presets pid=$!"
+  log_debug "net dispatch device=${device_label} id=${id} key=${key} type=presets path=/presets.json pid=$!"
   printf '%s' "$!"
 }
 
 start_patch_send() {
   local id=$1 payload=$2
   ensure_net_spool_dir
-  local url delay_ms
+  local url delay_ms statusfile
   url="$(api_base_url "$id")/json/state"
+  statusfile=$(net_status_path "$id" "patch")
   delay_ms=${WLEDTUI_NET_DELAY_MS:-0}
   if [[ "${WLEDTUI_ASYNC_DRY_RUN:-}" == "1" ]]; then
     (
       sleep_ms "$delay_ms"
+      printf '%s %s %s %s %s\n' "0" "$(now_ts)" "200" "0" "" > "$statusfile"
     ) &
   else
     (
       sleep_ms "$delay_ms"
+      local exit_code=0 http_status="" stderr_file stderr_snippet
+      stderr_file="${statusfile}.stderr.$$"
       # Security: use -- to terminate curl options so URL data cannot inject flags.
-      curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
+      http_status=$(curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
         --silent --show-error --fail \
+        --write-out '%{http_code}' \
         -H 'Content-Type: application/json' -X POST \
-        --data-binary "$payload" -- "$url" >/dev/null 2>&1
+        --data-binary "$payload" -- "$url" >/dev/null 2>"$stderr_file") || exit_code=$?
+      stderr_snippet=$(sanitize_for_display "$(head -c 160 "$stderr_file" 2>/dev/null || true)")
+      rm -f "$stderr_file"
+      printf '%s %s %s %s %s\n' "${exit_code:-0}" "$(now_ts)" "${http_status:-}" "0" "${stderr_snippet:-}" > "$statusfile"
     ) &
   fi
   printf '%s' "$!"
@@ -611,7 +619,7 @@ sync_desired_from_known() {
   DEV_DESIRED_PRESET[$id]="${DEV_PRESET[$id]:-0}"
   DEV_DESIRED_TRANSITION[$id]="${DEV_TRANSITION[$id]:-0}"
   DEV_DESIRED_NL_ON[$id]="${DEV_NL_ON[$id]:-false}"
-  DEV_DESIRED_LIVE[$id]="${DEV_LIVE[$id]:-false}"
+  DEV_DESIRED_LIVE[$id]="${DEV_DESIRED_LIVE[$id]:-${DEV_LIVE[$id]:-false}}"
   DEVICE_LIST_DIRTY=1
 }
 
@@ -631,7 +639,10 @@ apply_state_response() {
   DEV_BACKOFF[$id]="2"
   DEV_NEXT_POLL[$id]="$(( $(now_ts) + 2 ))"
   local normalized
-  normalized=$(jq -cS '.' <<<"$state")
+  if ! normalized=$(json_normalize_or_fail "$state"); then
+    apply_state_failure "$id"
+    return
+  fi
   DEV_STATE_TS[$id]=$(now_ts)
   if [[ "${DEV_STATE_JSON[$id]:-}" != "$normalized" ]]; then
     DEV_STATE_JSON[$id]="$normalized"
@@ -641,7 +652,6 @@ apply_state_response() {
     DEV_TRANSITION[$id]=$(jq -r '.transition // 0' <<<"$normalized")
     DEV_NL_ON[$id]=$(jq -r '.nl.on // false' <<<"$normalized")
     DEV_NL_DUR[$id]=$(jq -r '.nl.dur // 0' <<<"$normalized")
-    DEV_LIVE[$id]=$(jq -r '.live // false' <<<"$normalized")
     DEVICE_LIST_DIRTY=1
     sync_desired_from_known "$id"
     if [[ "$id" == "$(current_device_id)" ]]; then
@@ -687,7 +697,10 @@ apply_state_failure() {
 apply_info_response() {
   local id=$1 info=$2
   local normalized
-  normalized=$(jq -cS '.' <<<"$info")
+  if ! normalized=$(json_normalize_or_fail "$info"); then
+    DEV_INFO_STALE[$id]="1"
+    return
+  fi
   if [[ "${DEV_INFO_JSON[$id]:-}" == "$normalized" ]]; then
     return
   fi
@@ -695,6 +708,7 @@ apply_info_response() {
   DEV_VER[$id]=$(jq -r '.ver // ""' <<<"$normalized")
   DEV_WIFI[$id]=$(jq -r '.wifi.signal // ""' <<<"$normalized")
   DEV_UPTIME[$id]=$(jq -r '.uptime // ""' <<<"$normalized")
+  DEV_LIVE[$id]=$(jq -r '.live // false' <<<"$normalized")
   local wled_name
   wled_name=$(jq -r '.name // ""' <<<"$normalized")
   if [[ -n "$wled_name" && "${DEV_WLED_NAME[$id]:-}" != "$wled_name" ]]; then
@@ -741,7 +755,7 @@ schedule_effects_fetch() {
   if [[ -n "${DEV_GET_EFFECTS_INFLIGHT_PID[$id]:-}" ]]; then
     return
   fi
-  DEV_GET_EFFECTS_INFLIGHT_PID[$id]=$(start_get_request "$id" "effects" "/json/effects")
+  DEV_GET_EFFECTS_INFLIGHT_PID[$id]=$(start_get_request "$id" "effects" "/json/eff")
 }
 
 schedule_palettes_fetch() {
@@ -750,7 +764,7 @@ schedule_palettes_fetch() {
   if [[ -n "${DEV_GET_PALETTES_INFLIGHT_PID[$id]:-}" ]]; then
     return
   fi
-  DEV_GET_PALETTES_INFLIGHT_PID[$id]=$(start_get_request "$id" "palettes" "/json/palettes")
+  DEV_GET_PALETTES_INFLIGHT_PID[$id]=$(start_get_request "$id" "palettes" "/json/pal")
 }
 
 enqueue_patch() {
@@ -778,6 +792,19 @@ process_patch_queue() {
         continue
       fi
       wait "$pid" 2>/dev/null || true
+      local patch_status_file
+      patch_status_file=$(net_status_path "$id" "patch")
+      if [[ -f "$patch_status_file" ]]; then
+        local patch_line patch_exit patch_http patch_err
+        patch_line=$(cat "$patch_status_file" 2>/dev/null || true)
+        rm -f "$patch_status_file"
+        patch_exit=$(awk '{print $1}' <<<"$patch_line")
+        patch_http=$(awk '{print $3}' <<<"$patch_line")
+        patch_err=$(cut -d' ' -f5- <<<"$patch_line")
+        if [[ "${patch_exit:-1}" != "0" ]]; then
+          set_modal_error "Patch failed (HTTP ${patch_http:-?}) ${patch_err:-}"
+        fi
+      fi
       DEV_PATCH_INFLIGHT_PID[$id]=""
       dirty=1
     fi
@@ -2260,22 +2287,28 @@ handle_left() {
     4)
       local seg=${SEGMENTS[$SEGMENT_INDEX]}
       [[ -z "$seg" ]] && return
-      local r g b
+      local r g b w has_w
       r=$(jq -r '.col[0][0] // 0' <<<"$seg")
       g=$(jq -r '.col[0][1] // 0' <<<"$seg")
       b=$(jq -r '.col[0][2] // 0' <<<"$seg")
+      w=$(jq -r '.col[0][3] // 0' <<<"$seg")
+      has_w=$(jq -r '((.col[0] // []) | length) >= 4' <<<"$seg")
       case "$COLOR_CHANNEL" in
         0) r=$((r-5)); r=$(clamp "$r" 0 255) ;;
         1) g=$((g-5)); g=$(clamp "$g" 0 255) ;;
         2) b=$((b-5)); b=$(clamp "$b" 0 255) ;;
       esac
-      seg=$(jq -c --argjson r "$r" --argjson g "$g" --argjson b "$b" '.col[0]=[$r,$g,$b]' <<<"$seg")
+      if [[ "$has_w" == "true" ]]; then
+        seg=$(jq -c --argjson r "$r" --argjson g "$g" --argjson b "$b" --argjson w "$w" '.col[0]=[$r,$g,$b,$w]' <<<"$seg")
+      else
+        seg=$(jq -c --argjson r "$r" --argjson g "$g" --argjson b "$b" '.col[0]=[$r,$g,$b]' <<<"$seg")
+      fi
       SEGMENTS[$SEGMENT_INDEX]="$seg"
       update_segment_texts
       if (( SEG_APPLY_ALL )); then
-        enqueue_patch "$id" "$(jq -n --argjson r "$r" --argjson g "$g" --argjson b "$b" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}],applyAll:true}')"
+        if [[ "$has_w" == "true" ]]; then enqueue_patch "$id" "$(jq -n --argjson r "$r" --argjson g "$g" --argjson b "$b" --argjson w "$w" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,col:[[ $r,$g,$b,$w ]]}],applyAll:true}')"; else enqueue_patch "$id" "$(jq -n --argjson r "$r" --argjson g "$g" --argjson b "$b" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}],applyAll:true}')"; fi
       else
-        enqueue_patch "$id" "$(jq -n --argjson id "$SEGMENT_INDEX" --argjson r "$r" --argjson g "$g" --argjson b "$b" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}]}')"
+        if [[ "$has_w" == "true" ]]; then enqueue_patch "$id" "$(jq -n --argjson id "$SEGMENT_INDEX" --argjson r "$r" --argjson g "$g" --argjson b "$b" --argjson w "$w" '{seg:[{id:$id,col:[[ $r,$g,$b,$w ]]}]}')"; else enqueue_patch "$id" "$(jq -n --argjson id "$SEGMENT_INDEX" --argjson r "$r" --argjson g "$g" --argjson b "$b" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}]}')"; fi
       fi
       ;;
   esac
@@ -2337,22 +2370,28 @@ handle_right() {
     4)
       local seg=${SEGMENTS[$SEGMENT_INDEX]}
       [[ -z "$seg" ]] && return
-      local r g b
+      local r g b w has_w
       r=$(jq -r '.col[0][0] // 0' <<<"$seg")
       g=$(jq -r '.col[0][1] // 0' <<<"$seg")
       b=$(jq -r '.col[0][2] // 0' <<<"$seg")
+      w=$(jq -r '.col[0][3] // 0' <<<"$seg")
+      has_w=$(jq -r '((.col[0] // []) | length) >= 4' <<<"$seg")
       case "$COLOR_CHANNEL" in
         0) r=$((r+5)); r=$(clamp "$r" 0 255) ;;
         1) g=$((g+5)); g=$(clamp "$g" 0 255) ;;
         2) b=$((b+5)); b=$(clamp "$b" 0 255) ;;
       esac
-      seg=$(jq -c --argjson r "$r" --argjson g "$g" --argjson b "$b" '.col[0]=[$r,$g,$b]' <<<"$seg")
+      if [[ "$has_w" == "true" ]]; then
+        seg=$(jq -c --argjson r "$r" --argjson g "$g" --argjson b "$b" --argjson w "$w" '.col[0]=[$r,$g,$b,$w]' <<<"$seg")
+      else
+        seg=$(jq -c --argjson r "$r" --argjson g "$g" --argjson b "$b" '.col[0]=[$r,$g,$b]' <<<"$seg")
+      fi
       SEGMENTS[$SEGMENT_INDEX]="$seg"
       update_segment_texts
       if (( SEG_APPLY_ALL )); then
-        enqueue_patch "$id" "$(jq -n --argjson r "$r" --argjson g "$g" --argjson b "$b" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}],applyAll:true}')"
+        if [[ "$has_w" == "true" ]]; then enqueue_patch "$id" "$(jq -n --argjson r "$r" --argjson g "$g" --argjson b "$b" --argjson w "$w" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,col:[[ $r,$g,$b,$w ]]}],applyAll:true}')"; else enqueue_patch "$id" "$(jq -n --argjson r "$r" --argjson g "$g" --argjson b "$b" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}],applyAll:true}')"; fi
       else
-        enqueue_patch "$id" "$(jq -n --argjson id "$SEGMENT_INDEX" --argjson r "$r" --argjson g "$g" --argjson b "$b" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}]}')"
+        if [[ "$has_w" == "true" ]]; then enqueue_patch "$id" "$(jq -n --argjson id "$SEGMENT_INDEX" --argjson r "$r" --argjson g "$g" --argjson b "$b" --argjson w "$w" '{seg:[{id:$id,col:[[ $r,$g,$b,$w ]]}]}')"; else enqueue_patch "$id" "$(jq -n --argjson id "$SEGMENT_INDEX" --argjson r "$r" --argjson g "$g" --argjson b "$b" '{seg:[{id:$id,col:[[ $r,$g,$b ]]}]}')"; fi
       fi
       ;;
   esac
@@ -2545,14 +2584,12 @@ handle_live_toggle() {
   [[ -z "$id" ]] && return
   local live
   live=$(device_display_live "$id")
-  local new_live
   if [[ "$live" == "true" ]]; then
-    new_live=false
+    DEV_DESIRED_LIVE[$id]="false"
+    enqueue_patch "$id" "$(jq -n '{live:false}')"
   else
-    new_live=true
+    set_modal_error "Device not in realtime mode; release-only action"
   fi
-  DEV_DESIRED_LIVE[$id]="$new_live"
-  enqueue_patch "$id" "$(jq -n --argjson live "$new_live" '{live:$live}')"
 }
 
 handle_reboot() {
@@ -2698,7 +2735,7 @@ smoke_test() {
 
   TAB_INDEX=2
   local effects_pid
-  effects_pid=$(start_get_request "$id" "effects" "/json/effects")
+  effects_pid=$(start_get_request "$id" "effects" "/json/eff")
   DEV_GET_EFFECTS_INFLIGHT_PID[$id]="$effects_pid"
   local attempts=0
   while (( attempts < 50 )); do

@@ -66,20 +66,20 @@ api_set_state() {
 
 api_get_effects() {
   local id=$1
-  api_request GET "$id" '/json/effects'
+  api_request GET "$id" '/json/eff'
 }
 
 api_get_palettes() {
   local id=$1
-  api_request GET "$id" '/json/palettes'
+  api_request GET "$id" '/json/pal'
 }
 
 api_get_presets() {
   local id=$1
   local presets
-  presets=$(api_request GET "$id" '/json/presets' || true)
+  presets=$(api_request GET "$id" '/presets.json' || true)
   if [[ -z "$presets" ]]; then
-    presets=$(api_request GET "$id" '/presets.json' || true)
+    presets=$(api_request GET "$id" '/json/presets' || true)
   fi
   printf '%s' "$presets"
 }

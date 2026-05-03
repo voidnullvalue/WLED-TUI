@@ -161,7 +161,7 @@ parse_effects_tsv() {
     def entries_from_array:
       to_entries
       | map(select(.value != null))
-      | map({id:(.key|tonumber), name:(.value | normalize_name((.key|tostring)))});
+      | map({id:(.key|tonumber), name:(.value | normalize_name(""))});
 
     def entries_from_object:
       if has("effects") and (.effects|type == "array") then
@@ -180,16 +180,25 @@ parse_effects_tsv() {
         | .rows
       end;
 
+    def visible_effect: (.name != "RSVD" and .name != "-");
+
     if type == "array" then
       entries_from_array
+      | map(select(visible_effect))
       | .[]
       | "\(.id)\t\(.name)"
     elif type == "object" then
       entries_from_object
+      | map(select(visible_effect))
       | .[]
       | "\(.id)\t\(.name)"
     else empty end
   '
+}
+
+json_normalize_or_fail() {
+  local input=$1
+  jq -cS '.' <<<"$input" 2>/dev/null
 }
 
 read_key() {
