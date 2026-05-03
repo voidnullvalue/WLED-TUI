@@ -398,6 +398,10 @@ palettes_debug_log() {
 
 start_get_request() {
   local id=$1 type=$2 path=$3
+  if ! device_has_endpoint "$id"; then
+    log_debug "net skip invalid_device_id=${id:-} type=${type:-unknown}"
+    return 1
+  fi
   ensure_net_spool_dir
   local url outfile statusfile tmp delay_ms key device_label
   url="$(api_base_url "$id")$path"
@@ -439,6 +443,10 @@ start_get_request() {
 
 start_presets_request() {
   local id=$1
+  if ! device_has_endpoint "$id"; then
+    log_debug "net skip invalid_device_id=${id:-} type=presets"
+    return 1
+  fi
   ensure_net_spool_dir
   local base url outfile statusfile tmp delay_ms key device_label
   base="$(api_base_url "$id")"
@@ -487,6 +495,10 @@ start_presets_request() {
 
 start_patch_send() {
   local id=$1 payload=$2
+  if ! device_has_endpoint "$id"; then
+    log_debug "net skip invalid_device_id=${id:-} type=patch"
+    return 1
+  fi
   ensure_net_spool_dir
   local url delay_ms statusfile
   url="$(api_base_url "$id")/json/state"
@@ -745,49 +757,74 @@ apply_info_fields_from_json() {
 schedule_state_fetch() {
   local id=$1
   [[ -z "$id" ]] && return
+  if ! device_has_endpoint "$id"; then
+    log_debug "net skip invalid_device_id=${id:-} type=state"
+    return 1
+  fi
   if [[ -n "${DEV_GET_STATE_INFLIGHT_PID[$id]:-}" ]]; then
     return
   fi
-  DEV_GET_STATE_INFLIGHT_PID[$id]=$(start_get_request "$id" "state" "/json/state")
+  DEV_GET_STATE_INFLIGHT_PID[$id]=$(start_get_request "$id" "state" "/json/state" || true)
+  [[ -n "${DEV_GET_STATE_INFLIGHT_PID[$id]:-}" ]] || return 1
 }
 
 schedule_info_fetch() {
   local id=$1
   [[ -z "$id" ]] && return
+  if ! device_has_endpoint "$id"; then
+    log_debug "net skip invalid_device_id=${id:-} type=info"
+    return 1
+  fi
   if [[ -n "${DEV_GET_INFO_INFLIGHT_PID[$id]:-}" ]]; then
     return
   fi
-  DEV_GET_INFO_INFLIGHT_PID[$id]=$(start_get_request "$id" "info" "/json/info")
+  DEV_GET_INFO_INFLIGHT_PID[$id]=$(start_get_request "$id" "info" "/json/info" || true)
+  [[ -n "${DEV_GET_INFO_INFLIGHT_PID[$id]:-}" ]] || return 1
 }
 
 schedule_presets_fetch() {
   local id=$1
   [[ -z "$id" ]] && return
+  if ! device_has_endpoint "$id"; then
+    log_debug "net skip invalid_device_id=${id:-} type=presets"
+    return 1
+  fi
   if [[ -n "${DEV_GET_PRESETS_INFLIGHT_PID[$id]:-}" ]]; then
     return
   fi
   PRESETS_REFRESH_SEQ=$((PRESETS_REFRESH_SEQ + 1))
   DEV_PRESETS_CYCLE[$id]="$PRESETS_REFRESH_SEQ"
   preset_debug_log "$id" "schedule" "request=presets"
-  DEV_GET_PRESETS_INFLIGHT_PID[$id]=$(start_presets_request "$id")
+  DEV_GET_PRESETS_INFLIGHT_PID[$id]=$(start_presets_request "$id" || true)
+  [[ -n "${DEV_GET_PRESETS_INFLIGHT_PID[$id]:-}" ]] || return 1
 }
 
 schedule_effects_fetch() {
   local id=$1
   [[ -z "$id" ]] && return
+  if ! device_has_endpoint "$id"; then
+    log_debug "net skip invalid_device_id=${id:-} type=effects"
+    return 1
+  fi
   if [[ -n "${DEV_GET_EFFECTS_INFLIGHT_PID[$id]:-}" ]]; then
     return
   fi
-  DEV_GET_EFFECTS_INFLIGHT_PID[$id]=$(start_get_request "$id" "effects" "/json/eff")
+  DEV_GET_EFFECTS_INFLIGHT_PID[$id]=$(start_get_request "$id" "effects" "/json/eff" || true)
+  [[ -n "${DEV_GET_EFFECTS_INFLIGHT_PID[$id]:-}" ]] || return 1
 }
 
 schedule_palettes_fetch() {
   local id=$1
   [[ -z "$id" ]] && return
+  if ! device_has_endpoint "$id"; then
+    log_debug "net skip invalid_device_id=${id:-} type=palettes"
+    return 1
+  fi
   if [[ -n "${DEV_GET_PALETTES_INFLIGHT_PID[$id]:-}" ]]; then
     return
   fi
-  DEV_GET_PALETTES_INFLIGHT_PID[$id]=$(start_get_request "$id" "palettes" "/json/pal")
+  DEV_GET_PALETTES_INFLIGHT_PID[$id]=$(start_get_request "$id" "palettes" "/json/pal" || true)
+  [[ -n "${DEV_GET_PALETTES_INFLIGHT_PID[$id]:-}" ]] || return 1
 }
 
 enqueue_patch() {
@@ -852,7 +889,8 @@ process_patch_queue() {
     if (( now < due )); then
       continue
     fi
-    DEV_PATCH_INFLIGHT_PID[$id]=$(start_patch_send "$id" "$pending")
+    DEV_PATCH_INFLIGHT_PID[$id]=$(start_patch_send "$id" "$pending" || true)
+    [[ -n "${DEV_PATCH_INFLIGHT_PID[$id]:-}" ]] || continue
     DEV_PENDING_PATCH[$id]=""
     DEV_PATCH_DUE_MS[$id]="0"
     DEV_PATCH_LAST_SEND_MS[$id]="$now"
@@ -1070,6 +1108,7 @@ process_discover_results() {
       schedule_info_fetch "$id"
       schedule_presets_fetch "$id"
     done < "$outfile"
+    clamp_selected_device_index
     DEVICE_LIST_DIRTY=1
     UI_DIRTY=1
     model_save_devices
@@ -1157,7 +1196,29 @@ current_device_id() {
     printf ''
     return
   fi
+  if (( SELECTED_DEVICE_INDEX < 0 || SELECTED_DEVICE_INDEX >= ${#DEVICE_IDS[@]} )); then
+    printf ''
+    return
+  fi
   printf '%s' "${DEVICE_IDS[$SELECTED_DEVICE_INDEX]}"
+}
+
+device_has_endpoint() {
+  local id=${1:-}
+  [[ -n "$id" && -n "${DEV_HOST[$id]:-}" && -n "${DEV_PORT[$id]:-}" ]] && is_valid_port "${DEV_PORT[$id]}"
+}
+
+clamp_selected_device_index() {
+  local count=${#DEVICE_IDS[@]}
+  if (( count == 0 )); then
+    SELECTED_DEVICE_INDEX=0
+    return
+  fi
+  if (( SELECTED_DEVICE_INDEX < 0 )); then
+    SELECTED_DEVICE_INDEX=0
+  elif (( SELECTED_DEVICE_INDEX >= count )); then
+    SELECTED_DEVICE_INDEX=$((count - 1))
+  fi
 }
 
 box_top_line() {
@@ -2572,9 +2633,9 @@ handle_delete_device() {
   [[ -z "$id" ]] && return
   if confirm_prompt "Delete $(device_display_name "$id")?"; then
     model_remove_device "$id"
+    clamp_selected_device_index
     DEVICE_LIST_DIRTY=1
     model_save_devices
-    SELECTED_DEVICE_INDEX=0
     UI_DIRTY=1
   fi
 }
@@ -2603,6 +2664,7 @@ handle_edit_device() {
   local alias="${DEV_ALIAS[$id]:-}"
   local wled_name="${DEV_WLED_NAME[$id]:-}"
   model_remove_device "$id"
+  clamp_selected_device_index
   # Security: validate user-provided host/port before adding.
   if ! model_add_device "$name" "$host" "$port"; then
     FULL_REDRAW=1
@@ -2796,6 +2858,7 @@ smoke_test() {
 
 main_loop() {
   model_load_devices
+  clamp_selected_device_index
   if (( ${#DEVICE_IDS[@]} > 0 )); then
     local id
     for id in "${DEVICE_IDS[@]}"; do
