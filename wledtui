@@ -419,7 +419,7 @@ start_get_request() {
     http_status=$(curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
       --silent --show-error --fail \
       --write-out '%{http_code}' \
-      -- "$url" -o "$tmp" 2>"$stderr_file")
+      -o "$tmp" -- "$url" 2>"$stderr_file")
     exit_code=$?
     if (( exit_code == 0 )); then
       mv "$tmp" "$outfile"
@@ -460,14 +460,14 @@ start_presets_request() {
     # Security: use -- to terminate curl options so URL data cannot inject flags.
     http_status=$(curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
       --silent --show-error --fail --write-out '%{http_code}' \
-      -- "${base}/presets.json" -o "$tmp" 2>"$stderr_file")
+      -o "$tmp" -- "${base}/presets.json" 2>"$stderr_file")
     exit_code=$?
     if (( exit_code == 0 )); then
       mv "$tmp" "$outfile"
       bytes=$(wc -c < "$outfile" | tr -d ' ')
     elif http_status=$(curl --connect-timeout "$API_CONNECT_TIMEOUT" --max-time "$API_MAX_TIME" \
       --silent --show-error --fail --write-out '%{http_code}' \
-      -- "${base}/json/presets" -o "$tmp" 2>"$stderr_file"); then
+      -o "$tmp" -- "${base}/json/presets" 2>"$stderr_file"); then
       mv "$tmp" "$outfile"
       exit_code=0
       bytes=$(wc -c < "$outfile" | tr -d ' ')
@@ -714,9 +714,13 @@ apply_info_response() {
     DEV_INFO_STALE[$id]="1"
     return
   fi
-  if [[ "${DEV_INFO_JSON[$id]:-}" == "$normalized" ]]; then
-    return
-  fi
+  apply_info_fields_from_json "$id" "$normalized"
+  DEV_INFO_TS[$id]=$(now_ts)
+  MODEL_DIRTY=1
+}
+
+apply_info_fields_from_json() {
+  local id=$1 normalized=$2
   DEV_INFO_JSON[$id]="$normalized"
   DEV_VER[$id]=$(jq -r '.ver // ""' <<<"$normalized")
   DEV_WIFI[$id]=$(jq -r '.wifi.signal // ""' <<<"$normalized")
@@ -733,9 +737,9 @@ apply_info_response() {
   mac=$(jq -r '.mac // ""' <<<"$normalized")
   ip=$(jq -r '.ip // ""' <<<"$normalized")
   [[ -n "$mac" ]] && DEV_MAC[$id]="$mac"
-  [[ -n "$ip" ]] && DEV_IP[$id]="$ip"
-  DEV_INFO_TS[$id]=$(now_ts)
-  MODEL_DIRTY=1
+  if [[ -n "$ip" && "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    DEV_IP[$id]="$ip"
+  fi
 }
 
 schedule_state_fetch() {
@@ -822,6 +826,8 @@ process_patch_queue() {
         patch_err=$(cut -d' ' -f5- <<<"$patch_line")
         if [[ "${patch_exit:-1}" != "0" ]]; then
           set_modal_error "Patch failed (HTTP ${patch_http:-?}) ${patch_err:-}"
+        else
+          schedule_state_fetch "$id"
         fi
       fi
       DEV_PATCH_INFLIGHT_PID[$id]=""
@@ -1036,9 +1042,9 @@ process_discover_results() {
   rm -f "$statusfile"
   exit_code=$(awk '{print $1}' <<<"$status_line")
   if [[ "$exit_code" == "0" && -f "$outfile" ]]; then
-    local now
-    now=$(now_ts)
-    local entry parsed name host addr port
+  local now
+  now=$(now_ts)
+  local entry parsed name host addr port info_json
     while IFS= read -r entry; do
       [[ -z "$entry" ]] && continue
       parsed=$(parse_discovery_entry "$entry" || true)
@@ -1046,11 +1052,20 @@ process_discover_results() {
         log_debug "Skipping malformed discovery entry: ${entry}"
         continue
       fi
-      IFS=$'\t' read -r name host addr port <<<"$parsed"
-      model_add_device "$name" "$host" "$port" "$addr"
+    IFS=$'\t' read -r name host addr port info_json <<<"$parsed"
+      local wled_name="" mac="" info_ip=""
+      wled_name=$(jq -r '.name // ""' <<<"$info_json" 2>/dev/null || true)
+      mac=$(jq -r '.mac // ""' <<<"$info_json" 2>/dev/null || true)
+      info_ip=$(jq -r '.ip // ""' <<<"$info_json" 2>/dev/null || true)
+      [[ -n "$wled_name" && "$wled_name" != "null" ]] && name="$wled_name"
+      local add_ip="$addr"
+      [[ -n "$info_ip" && "$info_ip" != "null" ]] && add_ip="$info_ip"
       local id
-      id=$(device_id "$host" "$port")
+      if ! id=$(model_add_device "$name" "$host" "$port" "$add_ip" "$mac"); then
+        continue
+      fi
       DEV_LAST_SEEN[$id]="$now"
+      apply_info_response "$id" "$info_json"
       schedule_state_fetch "$id"
       schedule_info_fetch "$id"
       schedule_presets_fetch "$id"
@@ -1214,14 +1229,19 @@ rebuild_device_cache() {
     id=${DEVICE_IDS[$i]}
     name=$(device_display_name "$id")
     status=${DEV_ONLINE[$id]:-0}
-    bri=$(device_display_brightness "$id")
+    local has_state=0
+    if [[ -n "${DEV_STATE_JSON[$id]:-}" ]]; then has_state=1; fi
+    bri="?"
     local pending
     pending=$(brightness_pending_marker "$id")
-    preset=$(device_display_preset "$id")
-    on=$(device_display_on "$id")
-    marker="off"
-    if [[ "$on" == "true" ]]; then
-      marker="on"
+    preset="?"
+    marker="state:?"
+    if (( has_state )); then
+      bri=$(device_display_brightness "$id")
+      preset=$(device_display_preset "$id")
+      on=$(device_display_on "$id")
+      marker="off"
+      if [[ "$on" == "true" ]]; then marker="on"; fi
     fi
     stale_label=""
     if [[ "${DEV_STATE_STALE[$id]:-0}" == "1" ]]; then

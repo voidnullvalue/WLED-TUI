@@ -266,7 +266,13 @@ model_load_devices() {
     DEV_LAST_SEEN[$id]="$last_seen"
     DEV_ONLINE[$id]="$online"
     DEV_STATE_TS[$id]="$state_ts"
-    DEV_INFO_JSON[$id]="$info"
+    if [[ "$info" != "null" ]] && jq -e '.' <<<"$info" >/dev/null 2>&1; then
+      if declare -F apply_info_fields_from_json >/dev/null 2>&1; then
+        apply_info_fields_from_json "$id" "$info"
+      else
+        DEV_INFO_JSON[$id]="$info"
+      fi
+    fi
     [[ -n "$brightness" && "$brightness" != "null" ]] && DEV_BRI[$id]="$brightness"
     if [[ "$state" != "null" ]] && jq -e '.' <<<"$state" >/dev/null 2>&1; then
       DEV_STATE_JSON[$id]="$state"
