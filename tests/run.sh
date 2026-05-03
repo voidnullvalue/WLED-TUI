@@ -48,6 +48,7 @@ pass "interactive handlers no longer depend on jq-only payload builders"
 
 source ./lib/model.sh
 source ./lib/api.sh
+source ./lib/discover.sh
 tmp_cache=$(mktemp -d)
 CACHE_DIR="$tmp_cache"
 CACHE_FILE="$tmp_cache/devices.json"
@@ -100,6 +101,36 @@ DEV_NAME[$id2]=""
 [[ "$(device_display_name "$id2")" == "desk-strip.local:81" ]]
 pass "device_display_name preference chain remains alias>wled>mdns>host:port"
 
+if rg -n -- ' -- .* -o ' wledtui lib >/tmp/bad_curl.txt; then
+  cat /tmp/bad_curl.txt
+  exit 1
+fi
+pass "no curl -o option appears after --"
+
+tmpbin=$(mktemp -d)
+cat >"$tmpbin/curl" <<'EOF'
+#!/usr/bin/env bash
+seen_dd=0; out=""
+for a in "$@"; do
+  if [[ "$a" == "--" ]]; then seen_dd=1; continue; fi
+  if (( seen_dd )) && [[ "$a" == "-o" ]]; then exit 77; fi
+done
+i=1
+while (( i <= $# )); do
+  arg="${!i}"
+  if [[ "$arg" == "-o" ]]; then i=$((i+1)); out="${!i}"; fi
+  i=$((i+1))
+done
+[[ -n "$out" ]] || exit 78
+echo '{"ok":true}' >"$out"
+printf '200'
+EOF
+chmod +x "$tmpbin/curl"
+PATH="$tmpbin:$PATH"
+curl -o "$tmpbin/out.json" -- "http://example"
+jq -e '.ok==true' "$tmpbin/out.json" >/dev/null
+pass "fake curl enforces -o before -- and writes output file"
+
 echo "ALL TESTS PASSED"
 
 id_ret=$(model_add_device "Desk Strip" "desk-strip.local" 80 "10.0.0.11")
@@ -112,3 +143,17 @@ model_save_devices
 jq -e '.devices[]|select(.host=="desk-strip.local")|.state|type=="object"' "$CACHE_FILE" >/dev/null
 jq -e '.devices[]|select(.host=="desk-strip.local")|.info|type=="object"' "$CACHE_FILE" >/dev/null
 pass "cache state/info saved as objects"
+
+DEVICE_IDS=()
+declare -A DEV_NAME=() DEV_ALIAS=() DEV_WLED_NAME=() DEV_LAST_GOOD_WLED_NAME=() DEV_HOST=() DEV_PORT=() DEV_IP=() DEV_MAC=()
+declare -A DEV_VER=() DEV_WIFI=() DEV_UPTIME=() DEV_LIVE=() DEV_INFO_JSON=() DEV_ONLINE=() DEV_LAST_SEEN=() DEV_BRI=() DEV_ON=() DEV_PRESET=() DEV_TRANSITION=() DEV_NL_ON=() DEV_NL_DUR=() DEV_STATE_STALE=() DEV_STATE_TS=()
+cache2=$(mktemp -d)
+CACHE_DIR="$cache2"; CACHE_FILE="$cache2/devices.json"; CONFIG_FILE="$cache2/config.json"; CACHE_LOCK="$cache2/lock"
+cat >"$CACHE_FILE" <<'EOF'
+{"devices":[{"name":"wled-a.local","mdns_name":"wled-a.local","host":"wled-a.local","ip":"192.168.88.50","port":80,"last_seen":1,"state_ts":0,"state":null,"info":{"name":"Kitchen Strip","ver":"0.15.0","wifi":{"signal":88},"uptime":123,"mac":"aabbccddeeff","ip":"192.168.88.50"},"online":1,"brightness":0}]}
+EOF
+apply_info_fields_from_json(){ local id=$1 normalized=$2; DEV_INFO_JSON[$id]="$normalized"; DEV_VER[$id]=$(jq -r '.ver // ""'<<<"$normalized"); DEV_WIFI[$id]=$(jq -r '.wifi.signal // ""'<<<"$normalized"); DEV_UPTIME[$id]=$(jq -r '.uptime // ""'<<<"$normalized"); DEV_LIVE[$id]=$(jq -r '.live // false'<<<"$normalized"); DEV_WLED_NAME[$id]=$(jq -r '.name // ""'<<<"$normalized"); DEV_LAST_GOOD_WLED_NAME[$id]="${DEV_WLED_NAME[$id]:-}"; DEV_MAC[$id]=$(jq -r '.mac // ""'<<<"$normalized"); DEV_IP[$id]=$(jq -r '.ip // ""'<<<"$normalized"); }
+model_load_devices
+id3="wled-a.local:80"
+[[ "$(device_display_name "$id3")" == "Kitchen Strip" && "${DEV_VER[$id3]}" == "0.15.0" && "${DEV_WIFI[$id3]}" == "88" && "${DEV_UPTIME[$id3]}" == "123" && "${DEV_MAC[$id3]}" == "aabbccddeeff" && "${DEV_IP[$id3]}" == "192.168.88.50" ]]
+pass "cached info hydration populates display/runtime info fields"

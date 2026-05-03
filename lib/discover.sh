@@ -49,7 +49,12 @@ discover_secondary_verified() {
     IFS='|' read -r name host addr port <<<"$entry"
     out=$(mktemp)
     files+=("$out")
-    (api_probe_wled "$addr" "$port" >/dev/null 2>&1 && printf '%s\n' "$entry" > "$out") &
+    (
+      local info
+      if info=$(api_probe_wled "$addr" "$port" 2>/dev/null); then
+        printf '%s|%s\n' "$entry" "$info" > "$out"
+      fi
+    ) &
     pid=$!
     pids+=("$pid")
     if (( ${#pids[@]} >= concurrency )); then
@@ -71,7 +76,8 @@ discover_devices_report() {
   while IFS= read -r entry; do
     [[ -z "$entry" ]] && continue
     IFS='|' read -r name host addr port <<<"$entry"
-    found+=("$name|$host|$addr|$port")
+    info=$(api_probe_wled "$addr" "$port" 2>/dev/null || true)
+    found+=("$name|$host|$addr|$port|$info")
   done < <(discover_primary)
 
   if [[ ${#found[@]} -eq 0 ]]; then
@@ -89,21 +95,21 @@ discover_devices_report() {
     else
       use_host="$addr"
     fi
-    printf '%s|%s|%s|%s\n' "$name" "$use_host" "$addr" "$port"
+    printf '%s|%s|%s|%s|%s\n' "$name" "$use_host" "$addr" "$port" "$info"
   done
 }
 
 parse_discovery_entry() {
   local entry=$1
-  local name host addr port
-  IFS='|' read -r name host addr port <<<"$entry"
+  local name host addr port info
+  IFS='|' read -r name host addr port info <<<"$entry"
   if [[ -z "$host" || -z "$port" ]]; then
     return 1
   fi
   if ! is_valid_port "$port"; then
     return 1
   fi
-  printf '%s\t%s\t%s\t%s\n' "$name" "$host" "$addr" "$port"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$host" "$addr" "$port" "$info"
 }
 
 discover_devices() {
