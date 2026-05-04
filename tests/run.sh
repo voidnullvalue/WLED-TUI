@@ -8,6 +8,10 @@ pass(){ echo "PASS: $1"; }
 if ! rg -n "'/json/eff'" lib/api.sh >/dev/null; then exit 1; fi
 if ! rg -n "'/json/pal'" lib/api.sh >/dev/null; then exit 1; fi
 pass "api endpoints use /json/eff and /json/pal"
+rg -n 'start_get_request "\$id" "metadata" "/json"' wledtui >/dev/null
+pass "metadata refresh uses combined /json fetch"
+if rg -n 'DEV_PRESETS_JSON\[\$id\]=\$\(api_get_presets' wledtui >/dev/null; then exit 1; fi
+pass "opening presets no longer performs synchronous api_get_presets"
 
 actual=$(parse_effects_tsv <<<'["Solid","RSVD","Blink","-","Rainbow"]')
 expected=$'0\tSolid\n2\tBlink\n4\tRainbow'
@@ -65,6 +69,8 @@ DEV_LAST_SEEN['h2:81']=2
 model_save_devices
 jq -e '.devices|length==2' "$CACHE_FILE" >/dev/null
 pass "model_save_devices writes valid multi-device JSON in one save"
+jq -e '.devices[0]|has("effects") and has("palettes") and has("presets") and has("metadata_ver")' "$CACHE_FILE" >/dev/null
+pass "model_save_devices persists metadata cache fields"
 
 DEVICE_IDS=()
 unset DEV_NAME DEV_ALIAS DEV_WLED_NAME DEV_HOST DEV_PORT DEV_IP
