@@ -60,6 +60,10 @@ PATCH_DEBOUNCE_MS=${WLEDTUI_PATCH_DEBOUNCE_MS:-50}
 PATCH_MIN_SEND_INTERVAL_MS=${WLEDTUI_PATCH_MIN_SEND_INTERVAL_MS:-50}
 UI_ACTIVE_WINDOW_MS=${WLEDTUI_ACTIVE_WINDOW_MS:-400}
 PRESETS_REFRESH_SEQ=0
+WLEDTUI_EFFECTS_CACHE_TTL=${WLEDTUI_EFFECTS_CACHE_TTL:-86400}
+WLEDTUI_PALETTES_CACHE_TTL=${WLEDTUI_PALETTES_CACHE_TTL:-86400}
+WLEDTUI_PRESETS_CACHE_TTL=${WLEDTUI_PRESETS_CACHE_TTL:-600}
+WLEDTUI_FORCE_METADATA_REFRESH=${WLEDTUI_FORCE_METADATA_REFRESH:-0}
 
 LAST_REFRESH_SELECTED=0
 FRAME_INNER_ROWS=0
@@ -198,12 +202,8 @@ adjust_preset_index() {
 fetch_presets() {
   local id=$1
   ensure_config_dir
-  if [[ -z "${DEV_PRESETS_JSON[$id]:-}" ]]; then
-    # Adapted to preserve preset logic from 63c9ce9
-    DEV_PRESETS_JSON[$id]=$(api_get_presets "$id" || true)
-  fi
   with_lock "$PRESETS_LOCK" fetch_presets_locked "$id"
-  schedule_presets_fetch "$id"
+  schedule_metadata_refresh "$id" 0
 }
 
 fetch_presets_locked() {
@@ -258,13 +258,13 @@ fetch_presets_locked() {
 fetch_effects() {
   local id=$1
   load_effects_from_cache "$id"
-  schedule_effects_fetch "$id"
+  schedule_metadata_refresh "$id" 0
 }
 
 fetch_palettes() {
   local id=$1
   load_palettes_from_cache "$id"
-  schedule_palettes_fetch "$id"
+  schedule_metadata_refresh "$id" 0
 }
 
 load_effects_from_cache() {
@@ -398,6 +398,45 @@ palettes_debug_log() {
   local device_label
   device_label=$(device_display_name "$id")
   log_debug "palettes device=${device_label} id=${id} stage=${stage} ${message}"
+}
+
+metadata_cache_missing() {
+  local id=$1 type=$2
+  case "$type" in
+    effects) [[ -z "${DEV_EFFECTS_JSON[$id]:-}" ]] ;;
+    palettes) [[ -z "${DEV_PALETTES_JSON[$id]:-}" ]] ;;
+    presets) [[ -z "${DEV_PRESETS_JSON[$id]:-}" ]] ;;
+    *) return 0 ;;
+  esac
+}
+
+metadata_cache_stale() {
+  local id=$1 type=$2 ttl=$3 ts now
+  now=$(now_ts)
+  case "$type" in
+    effects) ts=${DEV_EFFECTS_TS[$id]:-0} ;;
+    palettes) ts=${DEV_PALETTES_TS[$id]:-0} ;;
+    presets) ts=${DEV_PRESETS_TS[$id]:-0} ;;
+    *) return 1 ;;
+  esac
+  (( ts <= 0 || now - ts >= ttl ))
+}
+
+schedule_metadata_refresh() {
+  local id=$1 force=${2:-0}
+  [[ -z "$id" ]] && return
+  local do_json=0 do_presets=0
+  if (( WLEDTUI_FORCE_METADATA_REFRESH )) || (( force )) || metadata_cache_missing "$id" effects || metadata_cache_missing "$id" palettes \
+    || metadata_cache_stale "$id" effects "$WLEDTUI_EFFECTS_CACHE_TTL" || metadata_cache_stale "$id" palettes "$WLEDTUI_PALETTES_CACHE_TTL"; then
+    do_json=1
+  fi
+  if (( WLEDTUI_FORCE_METADATA_REFRESH )) || (( force )) || metadata_cache_missing "$id" presets || metadata_cache_stale "$id" presets "$WLEDTUI_PRESETS_CACHE_TTL"; then
+    do_presets=1
+  fi
+  if (( do_json )) && [[ -z "${DEV_GET_METADATA_INFLIGHT_PID[$id]:-}" ]]; then
+    DEV_GET_METADATA_INFLIGHT_PID[$id]=$(start_get_request "$id" "metadata" "/json" || true)
+  fi
+  (( do_presets )) && schedule_presets_fetch "$id"
 }
 
 start_get_request() {
@@ -978,6 +1017,7 @@ process_get_result() {
         raw_snippet=$(sanitize_for_display "$raw_snippet")
         preset_debug_log "$id" "http_response" "exit=${exit_code} http=${status_http:-} size=${raw_size} snippet=${raw_snippet}"
         DEV_PRESETS_JSON[$id]=$(cat "$data_file" 2>/dev/null || true)
+        DEV_PRESETS_TS[$id]="${status_ts:-$(now_ts)}"
         preset_debug_log "$id" "state_assign" "var=DEV_PRESETS_JSON size=${raw_size}"
         if [[ "$id" == "$(current_device_id)" && "$TAB_INDEX" == "1" ]]; then
           with_lock "$PRESETS_LOCK" fetch_presets_locked "$id"
@@ -1013,6 +1053,24 @@ process_get_result() {
         fi
       fi
       ;;
+    metadata)
+      if [[ "$exit_code" == "0" && -f "$data_file" ]]; then
+        local payload old_ver new_ver
+        payload=$(cat "$data_file" 2>/dev/null || true)
+        if [[ -n "$payload" ]] && jq -e '.' <<<"$payload" >/dev/null 2>&1; then
+          DEV_STATE_JSON[$id]=$(jq -c '.state // {}' <<<"$payload")
+          DEV_INFO_JSON[$id]=$(jq -c '.info // {}' <<<"$payload")
+          old_ver="${DEV_METADATA_VER[$id]:-}"
+          new_ver=$(jq -r '((.info.ver // "") + "|" + ((.info.vid // "")|tostring))' <<<"$payload")
+          DEV_METADATA_VER[$id]="$new_ver"
+          if jq -e '.effects|type=="array"' <<<"$payload" >/dev/null 2>&1; then DEV_EFFECTS_JSON[$id]=$(jq -c '.effects' <<<"$payload"); DEV_EFFECTS_TS[$id]="${status_ts:-$(now_ts)}"; fi
+          if jq -e '.palettes|type=="array"' <<<"$payload" >/dev/null 2>&1; then DEV_PALETTES_JSON[$id]=$(jq -c '.palettes' <<<"$payload"); DEV_PALETTES_TS[$id]="${status_ts:-$(now_ts)}"; fi
+          if [[ "$new_ver" != "$old_ver" ]]; then DEV_EFFECTS_TS[$id]=0; DEV_PALETTES_TS[$id]=0; fi
+          if [[ "$id" == "$(current_device_id)" && "$TAB_INDEX" == "2" ]]; then load_effects_from_cache "$id"; UI_DIRTY=1; fi
+          if [[ "$id" == "$(current_device_id)" && "$TAB_INDEX" == "3" ]]; then load_palettes_from_cache "$id"; UI_DIRTY=1; fi
+        fi
+      fi
+      ;;
   esac
   if (( request_failed && UI_BUSY_REFRESH )) && [[ "$id" == "$UI_BUSY_REFRESH_ID" ]] && [[ "$type" == "state" ]]; then
     UI_BUSY_REFRESH_ERROR=1
@@ -1024,6 +1082,7 @@ process_get_result() {
     presets) pid=${DEV_GET_PRESETS_INFLIGHT_PID[$id]:-} ;;
     effects) pid=${DEV_GET_EFFECTS_INFLIGHT_PID[$id]:-} ;;
     palettes) pid=${DEV_GET_PALETTES_INFLIGHT_PID[$id]:-} ;;
+    metadata) pid=${DEV_GET_METADATA_INFLIGHT_PID[$id]:-} ;;
   esac
   if [[ -n "$pid" ]]; then
     if ! kill -0 "$pid" 2>/dev/null; then
@@ -1034,6 +1093,7 @@ process_get_result() {
         presets) DEV_GET_PRESETS_INFLIGHT_PID[$id]="" ;;
         effects) DEV_GET_EFFECTS_INFLIGHT_PID[$id]="" ;;
         palettes) DEV_GET_PALETTES_INFLIGHT_PID[$id]="" ;;
+        metadata) DEV_GET_METADATA_INFLIGHT_PID[$id]="" ;;
       esac
     fi
   fi
@@ -1143,7 +1203,7 @@ process_discover_results() {
       fi
       schedule_state_fetch "$canonical_id"
       schedule_info_fetch "$canonical_id"
-      schedule_presets_fetch "$canonical_id"
+      schedule_metadata_refresh "$canonical_id" 1
     done < "$outfile"
     clamp_selected_device_index
     DEVICE_LIST_DIRTY=1
@@ -1680,11 +1740,7 @@ build_status_lines() {
 build_presets_lines_locked() {
   local id=$1 width=$2
   if [[ ${#PRESETS_IDS[@]} -eq 0 ]]; then
-    if [[ -n "${DEV_GET_PRESETS_INFLIGHT_PID[$id]:-}" ]]; then
-      set_right_line 0 "$width" "Presets loading..."
-    else
-      set_right_line 0 "$width" "No presets found."
-    fi
+    set_right_line 0 "$width" "Loading presets from device..."
     preset_debug_log "$id" "render" "count=0"
     return
   fi
@@ -1712,7 +1768,7 @@ build_effects_lines() {
   local id
   id=$(current_device_id)
   if [[ ${#EFFECTS[@]} -eq 0 ]]; then
-    local hint="No effects loaded."
+    local hint="Loading effects from device..."
     local parse_hint=""
     if [[ -n "$id" ]]; then
       parse_hint="${DEV_EFFECTS_PARSE_ERROR[$id]:-}"
@@ -1738,7 +1794,7 @@ build_effects_lines() {
 build_palettes_lines() {
   local width=$1
   if [[ ${#PALETTES[@]} -eq 0 ]]; then
-    set_right_line 0 "$width" "No palettes loaded."
+    set_right_line 0 "$width" "Loading palettes from device..."
     return
   fi
   local i row=0
@@ -1834,7 +1890,7 @@ begin_busy_scan() {
 begin_busy_refresh() {
   local id=$1
   [[ -z "$id" ]] && return
-  log_debug "refresh begin device=$(device_display_name "$id") id=${id} key=$(net_key "$id") jobs=state,info,presets,effects,palettes"
+  log_debug "refresh begin device=$(device_display_name "$id") id=${id} key=$(net_key "$id") jobs=state,info,metadata,presets"
   UI_BUSY_REFRESH=1
   UI_BUSY_REFRESH_ID="$id"
   UI_BUSY_REFRESH_ERROR=0
@@ -1844,9 +1900,7 @@ begin_busy_refresh() {
   UI_SPINNER_LAST_MS=$(now_ms)
   schedule_state_fetch "$id"
   schedule_info_fetch "$id"
-  schedule_presets_fetch "$id"
-  schedule_effects_fetch "$id"
-  schedule_palettes_fetch "$id"
+  schedule_metadata_refresh "$id" 1
   UI_DIRTY=1
 }
 
@@ -2078,7 +2132,7 @@ build_frame() {
         ;;
       2)
         if (( ${#EFFECTS[@]} == 0 )); then
-          local hint="No effects loaded."
+          local hint="Loading effects from device..."
           local parse_hint="${DEV_EFFECTS_PARSE_ERROR[$id]:-}"
           local hint_row=0
           if [[ -n "$parse_hint" ]] && (( FRAME_INNER_ROWS > 1 )); then
@@ -2106,7 +2160,7 @@ build_frame() {
         ;;
       3)
         if (( ${#PALETTES[@]} == 0 )); then
-          RIGHT_LINES[0]=$(ui_pad_text "No palettes loaded." "$RIGHT_INNER_WIDTH")
+          RIGHT_LINES[0]=$(ui_pad_text "Loading palettes from device..." "$RIGHT_INNER_WIDTH")
         else
           for ((i=0; i<FRAME_INNER_ROWS; i++)); do
             if (( i < ${#PALETTES[@]} )); then

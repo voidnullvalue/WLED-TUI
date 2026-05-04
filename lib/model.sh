@@ -37,6 +37,7 @@ declare -A DEV_GET_INFO_INFLIGHT_PID=()
 declare -A DEV_GET_PRESETS_INFLIGHT_PID=()
 declare -A DEV_GET_EFFECTS_INFLIGHT_PID=()
 declare -A DEV_GET_PALETTES_INFLIGHT_PID=()
+declare -A DEV_GET_METADATA_INFLIGHT_PID=()
 declare -A DEV_ON=()
 declare -A DEV_PRESET=()
 declare -A DEV_VER=()
@@ -56,6 +57,9 @@ declare -A DEV_EFFECTS_JSON=()
 declare -A DEV_EFFECTS_PARSE_ERROR=()
 declare -A DEV_EFFECTS_TS=()
 declare -A DEV_PALETTES_JSON=()
+declare -A DEV_PALETTES_TS=()
+declare -A DEV_PRESETS_TS=()
+declare -A DEV_METADATA_VER=()
 declare -A DEV_STATE_TS=()
 declare -A DEV_STATE_STALE=()
 MODEL_DIRTY_FLAG=0
@@ -140,6 +144,7 @@ model_init_device_runtime() {
   DEV_GET_PRESETS_INFLIGHT_PID[$id]="${DEV_GET_PRESETS_INFLIGHT_PID[$id]:-}"
   DEV_GET_EFFECTS_INFLIGHT_PID[$id]="${DEV_GET_EFFECTS_INFLIGHT_PID[$id]:-}"
   DEV_GET_PALETTES_INFLIGHT_PID[$id]="${DEV_GET_PALETTES_INFLIGHT_PID[$id]:-}"
+  DEV_GET_METADATA_INFLIGHT_PID[$id]="${DEV_GET_METADATA_INFLIGHT_PID[$id]:-}"
   DEV_ON[$id]="${DEV_ON[$id]:-false}"
   DEV_PRESET[$id]="${DEV_PRESET[$id]:-0}"
   DEV_VER[$id]="${DEV_VER[$id]:-}"
@@ -160,6 +165,9 @@ model_init_device_runtime() {
   DEV_EFFECTS_PARSE_ERROR[$id]="${DEV_EFFECTS_PARSE_ERROR[$id]:-}"
   DEV_EFFECTS_TS[$id]="${DEV_EFFECTS_TS[$id]:-0}"
   DEV_PALETTES_JSON[$id]="${DEV_PALETTES_JSON[$id]:-}"
+  DEV_PALETTES_TS[$id]="${DEV_PALETTES_TS[$id]:-0}"
+  DEV_PRESETS_TS[$id]="${DEV_PRESETS_TS[$id]:-0}"
+  DEV_METADATA_VER[$id]="${DEV_METADATA_VER[$id]:-}"
   DEV_STATE_TS[$id]="${DEV_STATE_TS[$id]:-0}"
   DEV_STATE_STALE[$id]="${DEV_STATE_STALE[$id]:-0}"
 }
@@ -210,11 +218,13 @@ model_remove_device() {
   unset DEV_LAST_USER_ACTION_MS[$id]
   unset DEV_GET_STATE_INFLIGHT_PID[$id] DEV_GET_INFO_INFLIGHT_PID[$id]
   unset DEV_GET_PRESETS_INFLIGHT_PID[$id] DEV_GET_EFFECTS_INFLIGHT_PID[$id] DEV_GET_PALETTES_INFLIGHT_PID[$id]
+  unset DEV_GET_METADATA_INFLIGHT_PID[$id]
   unset DEV_ON[$id] DEV_PRESET[$id] DEV_VER[$id] DEV_WIFI[$id]
   unset DEV_UPTIME[$id] DEV_STATE_JSON[$id] DEV_INFO_JSON[$id] DEV_INFO_TS[$id]
   unset DEV_NEXT_POLL[$id] DEV_BACKOFF[$id]
   unset DEV_TRANSITION[$id] DEV_NL_ON[$id] DEV_NL_DUR[$id] DEV_LIVE[$id]
   unset DEV_PRESETS_JSON[$id] DEV_EFFECTS_JSON[$id] DEV_PALETTES_JSON[$id]
+  unset DEV_PRESETS_TS[$id] DEV_EFFECTS_TS[$id] DEV_PALETTES_TS[$id] DEV_METADATA_VER[$id]
   unset DEV_PRESETS_CYCLE[$id]
   unset DEV_EFFECTS_PARSE_ERROR[$id] DEV_EFFECTS_TS[$id]
   unset DEV_STATE_TS[$id] DEV_STATE_STALE[$id]
@@ -261,7 +271,7 @@ model_load_devices() {
     done
   fi
   if [[ ! -f "$CACHE_FILE" ]]; then return; fi
-  jq -rc '.devices[]? | [(.mdns_name // .name // ""),.host,(.ip // ""),(.port|tostring),(.last_seen // 0|tostring),(.state_ts // 0|tostring),(.state // null | @json),(.info // null | @json),(.online // 0|tostring),(.brightness // ""|tostring)] | @tsv' "$CACHE_FILE" 2>/dev/null | while IFS=$'\t' read -r name host ip port last_seen state_ts state info online brightness; do
+  jq -rc '.devices[]? | [(.mdns_name // .name // ""),.host,(.ip // ""),(.port|tostring),(.last_seen // 0|tostring),(.state_ts // 0|tostring),(.state // null | @json),(.info // null | @json),(.online // 0|tostring),(.brightness // ""|tostring),(.effects // null | @json),(.effects_ts // 0|tostring),(.palettes // null | @json),(.palettes_ts // 0|tostring),(.presets // null | @json),(.presets_ts // 0|tostring),(.metadata_ver // ""|tostring)] | @tsv' "$CACHE_FILE" 2>/dev/null | while IFS=$'\t' read -r name host ip port last_seen state_ts state info online brightness effects effects_ts palettes palettes_ts presets presets_ts metadata_ver; do
     local id
     if ! is_valid_host "$host" || ! is_valid_port "$port"; then continue; fi
     model_add_device "$name" "$host" "$port" "$ip" || continue
@@ -277,6 +287,13 @@ model_load_devices() {
       fi
     fi
     [[ -n "$brightness" && "$brightness" != "null" ]] && DEV_BRI[$id]="$brightness"
+    DEV_EFFECTS_TS[$id]="${effects_ts:-0}"
+    DEV_PALETTES_TS[$id]="${palettes_ts:-0}"
+    DEV_PRESETS_TS[$id]="${presets_ts:-0}"
+    DEV_METADATA_VER[$id]="${metadata_ver:-}"
+    if [[ "$effects" != "null" ]] && jq -e '.' <<<"$effects" >/dev/null 2>&1; then DEV_EFFECTS_JSON[$id]="$effects"; fi
+    if [[ "$palettes" != "null" ]] && jq -e '.' <<<"$palettes" >/dev/null 2>&1; then DEV_PALETTES_JSON[$id]="$palettes"; fi
+    if [[ "$presets" != "null" ]] && jq -e '.' <<<"$presets" >/dev/null 2>&1; then DEV_PRESETS_JSON[$id]="$presets"; fi
     if [[ "$state" != "null" ]] && jq -e '.' <<<"$state" >/dev/null 2>&1; then
       DEV_STATE_JSON[$id]="$state"
       DEV_BRI[$id]=$(jq -r '.bri // 0' <<<"$state")
@@ -297,12 +314,12 @@ model_save_devices() {
     state_json="${DEV_STATE_JSON[$id]:-null}"
     state_ts="${DEV_STATE_TS[$id]:-0}"
     config_rows+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "${DEV_NAME[$id]}" "${DEV_ALIAS[$id]:-}" "${DEV_WLED_NAME[$id]:-}" "${DEV_LAST_GOOD_WLED_NAME[$id]:-}" "${DEV_PREFERRED_NAME[$id]:-}" "${DEV_STABLE_ID[$id]:-$id}" "${DEV_MAC[$id]:-}" "${DEV_HOST[$id]}" "${DEV_IP[$id]:-}" "${DEV_PORT[$id]}")")
-    cache_rows+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "${DEV_NAME[$id]}" "${DEV_HOST[$id]}" "${DEV_IP[$id]:-}" "${DEV_PORT[$id]}" "${DEV_LAST_SEEN[$id]:-0}" "$state_ts" "$state_json" "${DEV_INFO_JSON[$id]:-null}" "${DEV_ONLINE[$id]:-0}" "${DEV_BRI[$id]:-0}")")
+    cache_rows+=("$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "${DEV_NAME[$id]}" "${DEV_HOST[$id]}" "${DEV_IP[$id]:-}" "${DEV_PORT[$id]}" "${DEV_LAST_SEEN[$id]:-0}" "$state_ts" "$state_json" "${DEV_INFO_JSON[$id]:-null}" "${DEV_ONLINE[$id]:-0}" "${DEV_BRI[$id]:-0}" "${DEV_EFFECTS_JSON[$id]:-null}" "${DEV_EFFECTS_TS[$id]:-0}" "${DEV_PALETTES_JSON[$id]:-null}" "${DEV_PALETTES_TS[$id]:-0}" "${DEV_PRESETS_JSON[$id]:-null}" "${DEV_PRESETS_TS[$id]:-0}" "${DEV_METADATA_VER[$id]:-}")")
   done
   local config_json='{"devices":[]}' cache_json='{"devices":[]}'
   if (( ${#config_rows[@]} > 0 )); then
     config_json=$(printf '%s\n' "${config_rows[@]}" | jq -Rsc 'split("\n")|map(select(length>0)|split("\t"))|{devices: map({name:.[0],mdns_name:.[0],alias:.[1],wled_name:.[2],last_good_wled_name:.[3],preferred_name:.[4],stable_id:.[5],mac:.[6],host:.[7],ip:.[8],port:(.[9]|tonumber)})}')
-    cache_json=$(printf '%s\n' "${cache_rows[@]}" | jq -Rsc 'split("\n")|map(select(length>0)|split("\t"))|{devices: map({name:.[0],mdns_name:.[0],host:.[1],ip:.[2],port:(.[3]|tonumber),last_seen:(.[4]|tonumber),state_ts:(.[5]|tonumber),state:(.[6]|fromjson?),info:(.[7]|fromjson?),online:(.[8]|tonumber),brightness:(.[9]|tonumber)})}')
+    cache_json=$(printf '%s\n' "${cache_rows[@]}" | jq -Rsc 'split("\n")|map(select(length>0)|split("\t"))|{devices: map({name:.[0],mdns_name:.[0],host:.[1],ip:.[2],port:(.[3]|tonumber),last_seen:(.[4]|tonumber),state_ts:(.[5]|tonumber),state:(.[6]|fromjson?),info:(.[7]|fromjson?),online:(.[8]|tonumber),brightness:(.[9]|tonumber),effects:(.[10]|fromjson?),effects_ts:(.[11]|tonumber),palettes:(.[12]|fromjson?),palettes_ts:(.[13]|tonumber),presets:(.[14]|fromjson?),presets_ts:(.[15]|tonumber),metadata_ver:.[16]})}')
   fi
   with_lock "$CACHE_LOCK" write_file "$cache_json" "$CACHE_FILE"
   write_file "$config_json" "$CONFIG_FILE"
