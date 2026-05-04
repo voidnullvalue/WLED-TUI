@@ -198,6 +198,15 @@ adjust_preset_index() {
   PRESET_INDEX=$next
   set_selected_preset_from_index
 }
+effects_available() { (( ${#EFFECTS[@]} > 0 && ${#EFFECT_IDS[@]} > 0 )); }
+palettes_available() { (( ${#PALETTES[@]} > 0 )); }
+presets_available() { (( ${#PRESETS_IDS[@]} > 0 && ${#PRESETS_NAMES[@]} > 0 )); }
+selected_effect_id_or_empty() { effects_available || return 0; (( EFFECT_INDEX >= 0 && EFFECT_INDEX < ${#EFFECT_IDS[@]} )) && printf '%s' "${EFFECT_IDS[$EFFECT_INDEX]}"; }
+selected_effect_name_or_empty() { effects_available || return 0; (( EFFECT_INDEX >= 0 && EFFECT_INDEX < ${#EFFECTS[@]} )) && printf '%s' "${EFFECTS[$EFFECT_INDEX]}"; }
+selected_palette_id_or_empty() { palettes_available || return 0; (( PALETTE_INDEX >= 0 && PALETTE_INDEX < ${#PALETTES[@]} )) && printf '%s' "$PALETTE_INDEX"; }
+selected_palette_name_or_empty() { palettes_available || return 0; (( PALETTE_INDEX >= 0 && PALETTE_INDEX < ${#PALETTES[@]} )) && printf '%s' "${PALETTES[$PALETTE_INDEX]}"; }
+selected_preset_id_or_empty() { presets_available || return 0; (( PRESET_INDEX >= 0 && PRESET_INDEX < ${#PRESETS_IDS[@]} )) && printf '%s' "${PRESETS_IDS[$PRESET_INDEX]}"; }
+clamp_index_for_count() { local idx=$1 count=$2; (( count <= 0 )) && { printf '0'; return; }; (( idx < 0 )) && idx=0; (( idx >= count )) && idx=$((count-1)); printf '%s' "$idx"; }
 
 fetch_presets() {
   local id=$1
@@ -251,6 +260,7 @@ fetch_presets_locked() {
     preset_debug_log "$id" "parse_empty" "status=${parse_status} jq_err=${jq_err}"
   fi
   sync_preset_index "$SELECTED_PRESET_ID"
+  PRESET_INDEX=$(clamp_index_for_count "$PRESET_INDEX" "${#PRESETS_IDS[@]}")
   preset_debug_log "$id" "validated" "count=${#PRESETS_IDS[@]}"
   PRESETS_CACHE_DIRTY=1
 }
@@ -313,12 +323,7 @@ load_effects_from_cache() {
     EFFECT_IDS+=("$idx")
     EFFECTS+=("$name")
   done
-  if (( EFFECT_INDEX >= ${#EFFECTS[@]} )); then
-    EFFECT_INDEX=$(( ${#EFFECTS[@]} - 1 ))
-    if (( EFFECT_INDEX < 0 )); then
-      EFFECT_INDEX=0
-    fi
-  fi
+  EFFECT_INDEX=$(clamp_index_for_count "$EFFECT_INDEX" "${#EFFECTS[@]}")
   DEV_EFFECTS_PARSE_ERROR[$id]=""
   effects_debug_log "$id" "parsed" "count=${#EFFECTS[@]} type=${raw_type} jq_exit=${parse_status} jq_err=${jq_err}"
 }
@@ -346,6 +351,7 @@ load_palettes_from_cache() {
   else
     palettes_debug_log "$id" "parsed" "count=${#PALETTES[@]} jq_exit=${parse_status} jq_err=${jq_err}"
   fi
+  PALETTE_INDEX=$(clamp_index_for_count "$PALETTE_INDEX" "${#PALETTES[@]}")
   PALETTES_CACHE_DIRTY=1
 }
 
@@ -413,12 +419,15 @@ metadata_cache_missing() {
 metadata_cache_stale() {
   local id=$1 type=$2 ttl=$3 ts now
   now=$(now_ts)
+  if ! is_uint "$ttl" || (( ttl <= 0 )); then ttl=3600; fi
   case "$type" in
     effects) ts=${DEV_EFFECTS_TS[$id]:-0} ;;
     palettes) ts=${DEV_PALETTES_TS[$id]:-0} ;;
     presets) ts=${DEV_PRESETS_TS[$id]:-0} ;;
     *) return 1 ;;
   esac
+  if ! is_uint "$ts"; then ts=0; fi
+  if ! is_uint "$now"; then return 0; fi
   (( ts <= 0 || now - ts >= ttl ))
 }
 
@@ -1085,17 +1094,15 @@ process_get_result() {
     metadata) pid=${DEV_GET_METADATA_INFLIGHT_PID[$id]:-} ;;
   esac
   if [[ -n "$pid" ]]; then
-    if ! kill -0 "$pid" 2>/dev/null; then
-      wait "$pid" 2>/dev/null || true
-      case "$type" in
-        state) DEV_GET_STATE_INFLIGHT_PID[$id]="" ;;
-        info) DEV_GET_INFO_INFLIGHT_PID[$id]="" ;;
-        presets) DEV_GET_PRESETS_INFLIGHT_PID[$id]="" ;;
-        effects) DEV_GET_EFFECTS_INFLIGHT_PID[$id]="" ;;
-        palettes) DEV_GET_PALETTES_INFLIGHT_PID[$id]="" ;;
-        metadata) DEV_GET_METADATA_INFLIGHT_PID[$id]="" ;;
-      esac
-    fi
+    wait "$pid" 2>/dev/null || true
+    case "$type" in
+      state) DEV_GET_STATE_INFLIGHT_PID[$id]="" ;;
+      info) DEV_GET_INFO_INFLIGHT_PID[$id]="" ;;
+      presets) DEV_GET_PRESETS_INFLIGHT_PID[$id]="" ;;
+      effects) DEV_GET_EFFECTS_INFLIGHT_PID[$id]="" ;;
+      palettes) DEV_GET_PALETTES_INFLIGHT_PID[$id]="" ;;
+      metadata) DEV_GET_METADATA_INFLIGHT_PID[$id]="" ;;
+    esac
   fi
 }
 
@@ -1377,6 +1384,7 @@ update_segment_texts() {
     SEGMENT_TEXT[$i]="Seg $i on:$on bri:$bri"
     SEGMENT_PRIMARY_COLOR[$i]="$col_vals"
   done
+  SEGMENT_INDEX=$(clamp_index_for_count "$SEGMENT_INDEX" "${#SEGMENTS[@]}")
   SEGMENTS_CACHE_DIRTY=1
 }
 
@@ -2617,13 +2625,16 @@ handle_enter() {
           enqueue_patch "$id" "$(jq -n --arg ps "$preset_id" '{ps:$ps}')"
         fi
         DEVICE_LIST_DIRTY=1
+      else
+        set_modal_error "No presets loaded yet."
       fi
       ;;
     2)
-      if [[ -n "${EFFECTS[$EFFECT_INDEX]:-}" ]]; then
+      if [[ -n "$(selected_effect_name_or_empty)" ]]; then
         local seg=${SEGMENTS[$SEGMENT_INDEX]:-}
         if [[ -n "$seg" ]]; then
-          local effect_id=${EFFECT_IDS[$EFFECT_INDEX]:-$EFFECT_INDEX}
+          local effect_id
+          effect_id=$(selected_effect_id_or_empty)
           if [[ "$effect_id" =~ ^-?[0-9]+$ ]]; then
             seg=$(jq -c --argjson fx "$effect_id" '.fx=$fx' <<<"$seg")
             SEGMENTS[$SEGMENT_INDEX]="$seg"
@@ -2644,10 +2655,12 @@ handle_enter() {
             fi
           fi
         fi
+      else
+        set_modal_error "No effects loaded yet."
       fi
       ;;
     3)
-      if [[ -n "${PALETTES[$PALETTE_INDEX]:-}" ]]; then
+      if [[ -n "$(selected_palette_name_or_empty)" ]]; then
         local seg=${SEGMENTS[$SEGMENT_INDEX]:-}
         if [[ -n "$seg" ]]; then
           seg=$(jq -c --argjson pal "$PALETTE_INDEX" '.pal=$pal' <<<"$seg")
@@ -2659,10 +2672,12 @@ handle_enter() {
             enqueue_patch "$id" "$(jq -n --argjson pal "$PALETTE_INDEX" --argjson id "$SEGMENT_INDEX" '{seg:[{id:$id,pal:$pal}]}')"
           fi
         fi
+      else
+        set_modal_error "No palettes loaded yet."
       fi
       ;;
     4)
-      local seg=${SEGMENTS[$SEGMENT_INDEX]}
+      local seg=${SEGMENTS[$SEGMENT_INDEX]:-}
       if [[ -n "$seg" ]]; then
         local on
         on=$(jq -r '.on // false' <<<"$seg")

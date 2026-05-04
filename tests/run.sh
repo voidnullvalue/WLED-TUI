@@ -333,3 +333,22 @@ if rg -n '^\s*[^#]*\$\(\s*model_add_device\b|^\s*[^#]*`\s*model_add_device\b' wl
   exit 1
 fi
 pass "runtime code avoids model_add_device command substitution"
+
+# metadata/index safety smoke tests
+EFFECTS=(); EFFECT_IDS=(); PALETTES=(); PRESETS_IDS=(); PRESETS_NAMES=(); SEGMENTS=()
+EFFECT_INDEX=5; PALETTE_INDEX=7; PRESET_INDEX=8; SEGMENT_INDEX=9
+[[ "$(selected_effect_id_or_empty)" == "" && "$(selected_palette_name_or_empty)" == "" && "$(selected_preset_id_or_empty)" == "" ]]
+pass "empty metadata selections are safe under set -u"
+
+id_safe="${DEVICE_IDS[0]:-}"
+if [[ -n "$id_safe" ]]; then
+  TAB_INDEX=2; handle_enter "$id_safe"
+  TAB_INDEX=3; handle_enter "$id_safe"
+  TAB_INDEX=1; handle_enter "$id_safe"
+fi
+pass "enter on empty effects/palettes/presets is non-fatal"
+
+WLEDTUI_EFFECTS_CACHE_TTL="bad"
+DEV_EFFECTS_TS["$id_safe"]=bogus
+metadata_cache_stale "$id_safe" effects "$WLEDTUI_EFFECTS_CACHE_TTL" >/dev/null
+pass "metadata_cache_stale tolerates invalid ts/ttl"

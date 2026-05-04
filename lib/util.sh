@@ -50,6 +50,11 @@ is_valid_port() {
   [[ "$port" =~ ^[0-9]{1,5}$ ]] && (( port >= 1 && port <= 65535 ))
 }
 
+is_uint() {
+  local v=${1:-}
+  [[ "$v" =~ ^[0-9]+$ ]]
+}
+
 write_file() {
   # Security: avoid shell evaluation when writing cached JSON.
   local content=$1 path=$2
